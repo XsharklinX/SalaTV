@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SalaTV</string>
+    <string name="vigia_name">Vigía de SalaTV</string>
+    <string name="media_name">Continuar viendo de SalaTV</string>
+    <string name="vigia_description">Cuando pulsas Inicio y Fire OS abre su inicio, SalaTV se pone delante. También hace que los botones del mando abran las apps que elijas.</string>
+</resources>
