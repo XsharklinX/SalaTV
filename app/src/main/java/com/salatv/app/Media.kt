@@ -31,6 +31,8 @@ class Watched(
     val dur: Long,
     val at: Long,
     val art: String?,
+    /** SalaTV profile that was watching; null in entries from 0.2. */
+    val profile: String? = null,
 ) {
     val key get() = Watching.key(pkg, title)
     val progress get() = if (dur > 0) (pos.toFloat() / dur).coerceIn(0f, 1f) else 0f
@@ -46,8 +48,14 @@ object Watching {
     private fun file(c: Context) = File(c.filesDir, "watching.json")
     private fun artDir(c: Context) = File(c.filesDir, "art").apply { mkdirs() }
 
-    @Synchronized
+    /** This profile's entries, newest first. */
     fun all(c: Context): List<Watched> {
+        val p = Prefs.current(c).id
+        return raw(c).filter { it.profile == null || it.profile == p }
+    }
+
+    @Synchronized
+    private fun raw(c: Context): List<Watched> {
         val f = file(c)
         if (!f.exists()) return emptyList()
         return try {
@@ -55,7 +63,8 @@ object Watching {
             (0 until a.length()).map { i ->
                 val o = a.getJSONObject(i)
                 Watched(o.getString("pkg"), o.getString("title"), o.optString("sub"), o.optString("id").ifEmpty { null },
-                    o.optString("uri").ifEmpty { null }, o.optLong("pos"), o.optLong("dur"), o.optLong("at"), o.optString("art").ifEmpty { null })
+                    o.optString("uri").ifEmpty { null }, o.optLong("pos"), o.optLong("dur"), o.optLong("at"), o.optString("art").ifEmpty { null },
+                    o.optString("profile").ifEmpty { null })
             }.sortedByDescending { it.at }
         } catch (e: Exception) { emptyList() }
     }
@@ -65,7 +74,7 @@ object Watching {
         val a = JSONArray()
         l.forEach {
             a.put(JSONObject().put("pkg", it.pkg).put("title", it.title).put("sub", it.sub).put("id", it.mediaId ?: "")
-                .put("uri", it.uri ?: "").put("pos", it.pos).put("dur", it.dur).put("at", it.at).put("art", it.art ?: ""))
+                .put("uri", it.uri ?: "").put("pos", it.pos).put("dur", it.dur).put("at", it.at).put("art", it.art ?: "").put("profile", it.profile ?: ""))
         }
         file(c).writeText(a.toString())
         val keep = l.mapNotNull { it.art }.toSet()
@@ -75,10 +84,10 @@ object Watching {
     /** Adds or updates by app and title. Finished items (under 2 minutes left) leave the row. */
     @Synchronized
     fun upsert(c: Context, w: Watched, art: Bitmap?) {
-        val l = all(c).filter { it.key != w.key }.toMutableList()
+        val l = raw(c).filter { it.key != w.key || (it.profile != null && it.profile != w.profile) }.toMutableList()
         val nearEnd = w.dur > 0 && w.dur - w.pos < 120_000 && w.pos > 60_000
         if (!nearEnd) {
-            val old = all(c).firstOrNull { it.key == w.key }?.art
+            val old = raw(c).firstOrNull { it.key == w.key }?.art
             var name = old
             if (art != null) {
                 name = "a" + w.key.hashCode().toUInt().toString(16) + ".jpg"
@@ -86,12 +95,12 @@ object Watching {
                     FileOutputStream(File(artDir(c), name)).use { crop(art).compress(Bitmap.CompressFormat.JPEG, 85, it) }
                 } catch (e: Exception) { name = old }
             }
-            l.add(0, Watched(w.pkg, w.title, w.sub, w.mediaId, w.uri, w.pos, w.dur, w.at, name))
+            l.add(0, Watched(w.pkg, w.title, w.sub, w.mediaId, w.uri, w.pos, w.dur, w.at, name, w.profile))
         }
-        save(c, l.take(MAX))
+        save(c, l.take(MAX * 3))
     }
 
-    fun remove(c: Context, key: String) = save(c, all(c).filter { it.key != key })
+    fun remove(c: Context, key: String) = save(c, raw(c).filter { it.key != key })
 
     fun art(c: Context, w: Watched): Bitmap? = w.art?.let { BitmapFactory.decodeFile(File(artDir(c), it).path) }
 
@@ -197,7 +206,8 @@ class MediaWatcher : NotificationListenerService() {
         val art = md.getBitmap(MediaMetadata.METADATA_KEY_ART) ?: md.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
             ?: md.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
         val w = Watched(ctl.packageName, title, sub, md.getString(MediaMetadata.METADATA_KEY_MEDIA_ID),
-            md.getString(MediaMetadata.METADATA_KEY_MEDIA_URI), pos.coerceAtLeast(0), dur, System.currentTimeMillis(), null)
+            md.getString(MediaMetadata.METADATA_KEY_MEDIA_URI), pos.coerceAtLeast(0), dur, System.currentTimeMillis(), null,
+            Prefs.current(applicationContext).id)
         val app = applicationContext
         Bg.run({ Watching.upsert(app, w, art) }) {}
     }

@@ -31,8 +31,8 @@ object Logic {
     private val TYPE_ORDER = listOf("Vídeo", "Música", "Juegos", "Fotos", "Noticias", "Social", "Herramientas", "App")
 
     /**
-     * A second Home press 0.3–3.5 s after the vigía brought SalaTV forward counts as «Inicio twice».
-     * On the TV, Amazon's home takes a few hundred ms to show after each press, so 2.5 s was too tight.
+     * A second Home press 0.3–1.5 s after the vigía brought SalaTV forward counts as «Inicio twice».
+     * Longer felt random on the TV: pressing Home again a bit later sent you back into Prime or Netflix.
      */
-    fun isDoubleHome(sinceJumpMs: Long, salaShown: Boolean) = salaShown && sinceJumpMs in 300..3500
+    fun isDoubleHome(sinceJumpMs: Long, salaShown: Boolean) = salaShown && sinceJumpMs in 300..1500
 }

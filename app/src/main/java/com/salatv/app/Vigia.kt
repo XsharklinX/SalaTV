@@ -161,6 +161,7 @@ class Vigia : AccessibilityService() {
         try {
             when {
                 w == "home" -> {}
+                w == "resume" -> if (Feed.cached(this).isNotEmpty()) startActivity(Intent(this, ResumePromptActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 w == "usual" -> UsageRank.ranks(this).filterKeys { it != packageName && isApp(it) }.maxByOrNull { it.value }?.key?.let { Sys.start(this, it, null) }
                 w == "last" -> Prefs.str(this, "lastApp")?.let { Sys.start(this, it, null) }
                 w.startsWith("app:") -> Sys.start(this, w.removePrefix("app:"), null)

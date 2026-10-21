@@ -114,10 +114,10 @@ class PinActivity : Activity() {
             val t = Ui.text(this, k, 26f, Ui.FG, Fonts.medium).apply {
                 gravity = Gravity.CENTER; isFocusable = true; isClickable = true
                 background = android.graphics.drawable.StateListDrawable().apply {
-                    addState(intArrayOf(android.R.attr.state_focused), GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = Ui.dp(this@PinActivity, 40f) })
+                    addState(intArrayOf(android.R.attr.state_focused), Ui.halo(this@PinActivity, Ui.LAMP, Ui.dp(this@PinActivity, 40f)))
                     addState(intArrayOf(), GradientDrawable().apply { setColor(Ui.PANEL2); cornerRadius = Ui.dp(this@PinActivity, 40f) })
                 }
-                setTextColor(android.content.res.ColorStateList(arrayOf(intArrayOf(android.R.attr.state_focused), intArrayOf()), intArrayOf(Ui.INK, Ui.FG)))
+                setTextColor(android.content.res.ColorStateList(arrayOf(intArrayOf(android.R.attr.state_focused), intArrayOf()), intArrayOf(Ui.FG, Ui.FG)))
                 setOnClickListener { press(k) }
             }
             if (k == "5") five = t

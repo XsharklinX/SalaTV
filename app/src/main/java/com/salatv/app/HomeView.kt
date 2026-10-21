@@ -32,30 +32,41 @@ import kotlin.math.sin
 
 /**
  * The home, drawn by hand on one canvas: no layouts, no libraries. Everything is placed on a 960×540
- * grid (the TV's size in dp) and scaled by [u]. Rows: -1 the chips at the top, 0 the dock on the glass
- * shelf, 1 «Continuar viendo» when there is something in it, then the grid of every other app.
+ * grid (the TV's size in dp) and scaled by [u]; [dens] makes tiles and cards smaller or larger.
+ *
+ * Lines from top to bottom: the chips, the trends carousel (when TMDB is on), the dock on the glass
+ * shelf, the card rows («Seguir viendo», «Mi lista», «Temporada») and the grid of every other app.
+ * The top of the screen always describes what has the focus.
  */
 class HomeView(context: Context) : View(context) {
 
     interface Host {
         fun onOpen(item: Item)
         fun onChip(chip: Chip)
-        fun onMenu(item: Item, inDock: Boolean)
+        fun onMenu(item: Item, inDock: Boolean, anchor: Rect)
         fun onDockMoved(pkgs: List<String>)
         fun onMove()
+        /** 0 = watch in its app, 1 = add to or remove from «Mi lista», 2 = title page. */
+        fun onTrend(t: Title, action: Int)
     }
 
     sealed class Item(val key: String) {
         class App(val e: AppEntry, val note: String?) : Item("a:" + e.pkg)
         class Fold(val f: Folder, val apps: List<AppEntry>) : Item("f:" + f.id)
         class Hidden(val count: Int) : Item("hidden")
-        /** Something watched, from the media sessions. */
-        class Media(val w: Watched, val app: AppEntry?, val art: Bitmap?) : Item("m:" + w.key)
-        /** An app opened lately with nothing known about what was in it. */
-        class Recent(val e: AppEntry, val at: Long) : Item("r:" + e.pkg)
+        /** «Seguir viendo» or «Temporada». */
+        class Card(val s: Show, val row: String) : Item("s:" + s.key)
+        /** «Mi lista». */
+        class Pick(val t: Title) : Item(t.key)
     }
 
     class Chip(val id: String, val label: String, val icon: Int, val title: String, val desc: String, val warn: Boolean = false, val color: Int = 0)
+
+    class CardRow(val id: String, val label: String, val items: List<Item>)
+
+    private enum class Kind { CHIPS, HERO, DOCK, CARDS, GRID }
+
+    private class Line(val kind: Kind, val items: List<Any>, val y: Float, val label: String? = null)
 
     private class Anim(var v: Float) {
         var t = v
@@ -68,46 +79,45 @@ class HomeView(context: Context) : View(context) {
         fun snap(x: Float) { v = x; t = x }
     }
 
-    private class Hero(val label: String, val title: String, val desc: String, val hint: String?)
-
     companion object {
         const val SEARCH = 1; const val INPUT = 2; const val WIFI = 3; const val GEAR = 4
         const val AVATAR = 5; const val WARN = 6; const val NOWIFI = 7
-        const val COLS = 7
-        private const val DOCK_Y = 394f
-        private const val CONT_Y = 590f
-        private const val CONT_W = 196f
-        private const val CONT_H = 110f
-        private const val CONT_STEP = 214f
-        private const val GRID_X = 54f
-        private const val GRID_W = 108f
-        private const val GRID_H = 61f
-        private const val GRID_STEP_X = 124f
-        private const val GRID_PITCH = 100f
+        private const val MARGIN = 48f
     }
 
     var host: Host? = null
-    /** Last frame of the previous session, shown until the apps are loaded («Arranque al instante»). */
     var placeholder: Bitmap? = null
+
     private var chips: List<Chip> = emptyList()
+    private var trends: List<Title> = emptyList()
     private val dock = mutableListOf<Item>()
-    private var cont: List<Item> = emptyList()
+    private var rows: List<CardRow> = emptyList()
     private var grid: List<Item> = emptyList()
     private var gridLabel = "Todas tus apps"
     private var greetName: String? = null
-    private var row = 0
+    private var mine: Set<String> = emptySet()
+    private var lines: List<Line> = emptyList()
+    private var li = 0
     private var col = 0
     private var focusKey: String? = null
     var moveMode = false
         private set
     private var fast = false
 
+    private var trendIx = 0
+    private var trendSince = SystemClock.uptimeMillis()
+    private var lastInput = SystemClock.uptimeMillis()
+    private var noticeText: String? = null
+    private var noticeUntil = 0L
+
     private var u = 1f
+    private var dens = 1f
     private var pal = Pal(false)
+    private var kenBurns = true
     private var lastFrame = 0L
     private var frameK = 0.2f
     private val scroll = Anim(0f)
-    private val contOff = Anim(0f)
+    private val rowOff = HashMap<String, Anim>()
     private val fade = Anim(1f)
     private val mix = Anim(1f)
     private val zoom = Anim(0f)
@@ -125,7 +135,7 @@ class HomeView(context: Context) : View(context) {
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND }
     private val bmp = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    private val shadow = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val glow = Paint(Paint.ANTI_ALIAS_FLAG)
     private val txt = Paint(Paint.ANTI_ALIAS_FLAG)
     private val mask = Paint(Paint.ANTI_ALIAS_FLAG).apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN) }
     private val shade = Paint()
@@ -135,124 +145,150 @@ class HomeView(context: Context) : View(context) {
     private val src = Rect()
     private val m = Matrix()
     private val path = Path()
-    private var leftShade: Shader? = null
-    private var bottomShade: Shader? = null
-    private var shadeFor = 0
     private val clockFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
     private val dateFmt = SimpleDateFormat("EEEE d 'de' MMMM", Locale("es"))
 
     private val tick = object : Runnable {
         override fun run() {
             pal = Pal(Look.isDay(context))
+            val now = SystemClock.uptimeMillis()
+            val onHero = lines.getOrNull(li)?.kind == Kind.HERO
+            if (trends.size > 1 && now - trendSince > 8000 && now - lastInput > (if (onHero) 15000 else 6000) && pending == null) {
+                trendIx = (trendIx + 1) % trends.size
+                trendSince = now
+                if (heroShowsTrend()) focusChanged(true)
+            }
             invalidate()
-            postDelayed(this, 20_000)
+            postDelayed(this, 1000)
         }
     }
 
     override fun onAttachedToWindow() { super.onAttachedToWindow(); post(tick) }
     override fun onDetachedFromWindow() { removeCallbacks(tick); super.onDetachedFromWindow() }
-    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) { u = w / 960f; shadeFor = 0 }
+    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) { u = w / 960f }
 
     private fun s(v: Float) = v * u
 
+    // ---------------------------------------------------------------- layout
+
+    private fun tileW() = min(136f * dens, (864f - (dock.size - 1) * 18f * dens) / max(1, dock.size))
+    private fun tileH() = tileW() * 76f / 136f
+    private fun heroBottom() = when { dens < 0.95f -> 330f; dens > 1.05f -> 372f; else -> 360f }
+    private fun dockY() = heroBottom() + 24f * dens
+    private fun shelfBottom() = dockY() + 76f * dens + 26f * dens
+    private fun cardW() = 212f * dens
+    private fun cardH() = cardW() * 9f / 16f
+    private fun cardStep() = cardW() + 18f * dens
+    private fun cardsPerScreen() = ((960f - MARGIN * 2 + 18f * dens) / cardStep()).toInt()
+    private fun gW() = 108f * dens
+    private fun gH() = gW() * 61f / 108f
+    private fun gStep() = gW() + 16f * dens
+    private fun cols() = max(4, ((960f - MARGIN * 2 + 16f * dens) / gStep()).toInt())
+
+    private fun build() {
+        val l = mutableListOf<Line>()
+        l += Line(Kind.CHIPS, chips, 0f)
+        if (trends.isNotEmpty()) l += Line(Kind.HERO, listOf("ver", "lista"), 0f)
+        if (dock.isNotEmpty()) l += Line(Kind.DOCK, dock, dockY())
+        var y = shelfBottom() + 30f * dens
+        rows.filter { it.items.isNotEmpty() }.forEach { r ->
+            l += Line(Kind.CARDS, r.items, y, r.label)
+            y += 26f * dens + cardH() + 52f * dens
+        }
+        if (grid.isNotEmpty()) {
+            y += 26f * dens
+            val n = cols()
+            grid.chunked(n).forEachIndexed { i, chunk -> l += Line(Kind.GRID, chunk, y, if (i == 0) gridLabel else null); y += gH() + 42f * dens }
+        }
+        lines = l
+    }
+
     // ---------------------------------------------------------------- data and focus
 
-    fun setData(newChips: List<Chip>, newDock: List<Item>, newCont: List<Item>, newGrid: List<Item>, name: String?, label: String) {
+    fun setData(newChips: List<Chip>, newTrends: List<Title>, newDock: List<Item>, newRows: List<CardRow>, newGrid: List<Item>,
+                name: String?, label: String, myList: Set<String>) {
         chips = newChips
+        if (newTrends.map { it.key } != trends.map { it.key }) { trendIx = 0; trendSince = SystemClock.uptimeMillis() }
+        trends = newTrends
         dock.clear(); dock.addAll(newDock)
-        cont = newCont
+        rows = newRows
         grid = newGrid
         greetName = name
         gridLabel = label
+        mine = myList
         placeholder = null
         pal = Pal(Look.isDay(context))
+        dens = when (Prefs.int(context, "density", 1)) { 0 -> 0.84f; 2 -> 1.12f; else -> 1f }
+        kenBurns = Prefs.bool(context, "kenBurns", true)
+        build()
         val keep = focusKey
         var found = false
-        if (keep != null) {
-            chips.indexOfFirst { "c:" + it.id == keep }.takeIf { it >= 0 }?.let { row = -1; col = it; found = true }
-            if (!found) dock.indexOfFirst { it.key == keep }.takeIf { it >= 0 }?.let { row = 0; col = it; found = true }
-            if (!found) cont.indexOfFirst { it.key == keep }.takeIf { it >= 0 }?.let { row = 1; col = it; found = true }
-            if (!found) grid.indexOfFirst { it.key == keep }.takeIf { it >= 0 }?.let { row = gridStart() + it / COLS; col = it % COLS; found = true }
+        if (keep != null) for ((i, line) in lines.withIndex()) {
+            val c = line.items.indexOfFirst { keyOf(it) == keep }
+            if (c >= 0) { li = i; col = c; found = true; break }
         }
-        if (!found) clamp()
+        if (!found) {
+            li = lines.indexOfFirst { it.kind == Kind.DOCK }.takeIf { it >= 0 } ?: lines.indexOfFirst { it.kind == Kind.HERO }.coerceAtLeast(0)
+            col = 0
+        }
+        clamp()
         focusChanged(bgCur != null)
     }
 
-    private fun hasCont() = cont.isNotEmpty()
-    private fun gridStart() = if (hasCont()) 2 else 1
-    private fun isCont(r: Int) = hasCont() && r == 1
-    private fun gridRows() = (grid.size + COLS - 1) / COLS
-    private fun gridY0() = if (hasCont()) 812f else 604f
-
-    private fun rowSize(r: Int) = when {
-        r == -1 -> chips.size
-        r == 0 -> dock.size
-        isCont(r) -> cont.size
-        r >= gridStart() -> min(COLS, grid.size - (r - gridStart()) * COLS).coerceAtLeast(0)
-        else -> 0
+    /** A short message under the clock for a few seconds («Nuevo episodio…»). */
+    fun notice(text: String) {
+        noticeText = text
+        noticeUntil = SystemClock.uptimeMillis() + 7000
+        invalidate()
     }
 
-    private fun rowY(r: Int) = when {
-        r <= 0 -> 0f
-        isCont(r) -> CONT_Y
-        else -> gridY0() + (r - gridStart()) * GRID_PITCH
-    }
+    private fun keyOf(o: Any?): String? = when (o) { is Chip -> "c:" + o.id; is Item -> o.key; is String -> "hero:$o"; else -> null }
 
     private fun clamp() {
-        if (row == -1 && chips.isEmpty()) row = 0
-        if (row == 0 && dock.isEmpty()) row = if (hasCont() || grid.isNotEmpty()) 1 else -1
-        if (row >= 1 && !isCont(row)) {
-            row = if (gridRows() == 0) (if (hasCont()) 1 else if (dock.isNotEmpty()) 0 else -1)
-            else row.coerceIn(gridStart(), gridStart() + gridRows() - 1)
+        li = li.coerceIn(0, max(0, lines.size - 1))
+        col = col.coerceIn(0, max(0, (lines.getOrNull(li)?.items?.size ?: 1) - 1))
+    }
+
+    private fun line() = lines.getOrNull(li)
+    private fun current(): Any? = line()?.items?.getOrNull(col)
+    private fun trend(): Title? = trends.getOrNull(trendIx)
+    private fun heroShowsTrend() = trends.isNotEmpty() && line()?.kind.let { it == Kind.HERO || it == Kind.DOCK || (it == Kind.CHIPS && (current() as? Chip)?.warn != true) }
+
+    private fun itemColor(o: Any?): Int = when (o) {
+        is Item.App -> o.e.color
+        is Item.Card -> Services.badge(o.s.pkg).second
+        is Item.Pick -> o.t.pkgs.firstOrNull()?.let { Services.badge(it).second } ?: Ui.LAMP
+        is Item.Fold -> o.apps.firstOrNull()?.color ?: Ui.LAMP
+        is Chip -> if (o.warn) Ui.WARN else if (o.color != 0) o.color else Ui.LAMP
+        else -> trend()?.pkgs?.firstOrNull()?.let { Services.badge(it).second } ?: Ui.LAMP
+    }
+
+    private fun img(src: String?, w: Int): Bitmap? = Img.get(context, src, w) { invalidate() }
+
+    private fun tmdb(path: String?, size: String) = path?.let { Tmdb.IMG + size + it }
+
+    /** The big picture behind the top of the screen for what has the focus. */
+    private fun heroArt(): Bitmap? {
+        val cur = current()
+        return when {
+            cur is Item.Card -> img(cur.s.image, 960)
+            cur is Item.Pick -> img(tmdb(cur.t.backdrop, "w780"), 960)
+            heroShowsTrend() -> img(tmdb(trend()?.backdrop, "w1280"), 1280)
+            cur is Item.App -> cur.e.banner ?: cur.e.icon
+            cur is Item.Fold -> cur.apps.firstOrNull()?.banner
+            else -> null
         }
-        col = col.coerceIn(0, max(0, rowSize(row) - 1))
-    }
-
-    private fun current(): Any? = when {
-        row == -1 -> chips.getOrNull(col)
-        row == 0 -> dock.getOrNull(col)
-        isCont(row) -> cont.getOrNull(col)
-        else -> grid.getOrNull((row - gridStart()) * COLS + col)
-    }
-
-    private fun mediaArt(item: Item): Bitmap? = when (item) {
-        is Item.Media -> item.art ?: item.app?.banner
-        is Item.Recent -> item.e.banner
-        is Item.App -> item.e.banner ?: item.e.icon
-        is Item.Fold -> item.apps.firstOrNull()?.let { it.banner ?: it.icon }
-        else -> null
-    }
-
-    private fun itemColor(item: Item): Int = when (item) {
-        is Item.App -> item.e.color
-        is Item.Media -> item.app?.color ?: Ui.LAMP
-        is Item.Recent -> item.e.color
-        is Item.Fold -> item.apps.firstOrNull()?.color ?: Ui.LAMP
-        else -> 0xFF8FA2C8.toInt()
     }
 
     private fun focusChanged(animate: Boolean) {
         val cur = current()
-        focusKey = when (cur) { is Chip -> "c:" + cur.id; is Item -> cur.key; else -> null }
-        val color: Int
-        val bg: Bitmap = when (cur) {
-            is Item.App -> { color = cur.e.color; AppRepo.blurred(cur.e) }
-            is Item.Media -> {
-                color = itemColor(cur)
-                when {
-                    cur.art != null -> AppRepo.blurredArt(cur.key, cur.art)
-                    cur.app != null -> AppRepo.blurred(cur.app)
-                    else -> AppRepo.plain(color)
-                }
-            }
-            is Item.Recent -> { color = cur.e.color; AppRepo.blurred(cur.e) }
-            is Item.Fold -> {
-                val first = cur.apps.firstOrNull()
-                color = first?.color ?: Ui.LAMP
-                if (first != null) AppRepo.blurred(first) else AppRepo.plain(Ui.LAMP)
-            }
-            is Chip -> { color = if (cur.warn) Ui.WARN else if (cur.color != 0) cur.color else Ui.LAMP; AppRepo.plain(color) }
-            else -> { color = 0xFF8FA2C8.toInt(); AppRepo.plain(color) }
+        focusKey = keyOf(cur)
+        val color = itemColor(cur)
+        val art = heroArt()
+        val bg: Bitmap = when {
+            art != null -> AppRepo.blurredArt(focusKey + (if (heroShowsTrend()) trend()?.key else ""), art)
+            cur is Item.App -> AppRepo.blurred(cur.e)
+            else -> AppRepo.plain(color)
         }
         if (bg !== bgCur) {
             bgPrev = bgCur; bgCur = bg
@@ -262,134 +298,138 @@ class HomeView(context: Context) : View(context) {
             colorPrev = Ui.lerp(colorPrev, colorCur, mix.v); colorCur = color
             if (animate) { mix.v = 0f; mix.t = 1f } else mix.snap(1f)
         }
-        scroll.t = if (row >= 1) rowY(row) - 300f else 0f
-        if (isCont(row)) {
-            val maxOff = max(0f, (cont.size - 4) * CONT_STEP)
-            contOff.t = ((col - 3) * CONT_STEP).coerceIn(0f, maxOff)
+        val ln = line()
+        scroll.t = if (ln == null || ln.kind == Kind.CHIPS || ln.kind == Kind.HERO || ln.kind == Kind.DOCK) 0f else ln.y - 250f
+        if (ln?.kind == Kind.CARDS) {
+            val a = rowOff.getOrPut(ln.label ?: "") { Anim(0f) }
+            val per = cardsPerScreen()
+            a.t = ((col - (per - 2)) * cardStep()).coerceIn(0f, max(0f, (ln.items.size - per) * cardStep()))
+            if (!animate) a.snap(a.t)
         }
-        if (!animate) { scroll.snap(scroll.t); contOff.snap(contOff.t) }
+        if (!animate) scroll.snap(scroll.t)
         invalidate()
     }
 
-    private fun dockTileW(): Float {
-        val n = dock.size
-        return if (n == 0) 136f else min(136f, (864f - (n - 1) * 18f) / n)
-    }
-
-    private fun centerX(r: Int, c: Int): Float = when {
-        r == -1 -> chipCx.getOrElse(c) { 800f }
-        r == 0 -> 48f + c * (dockTileW() + 18f) + dockTileW() / 2
-        isCont(r) -> 48f + c * CONT_STEP + CONT_W / 2 - contOff.t
-        else -> GRID_X + c * GRID_STEP_X + GRID_W / 2
-    }
-
-    private fun nearest(r: Int, x: Float): Int {
-        var best = 0; var d = Float.MAX_VALUE
-        for (i in 0 until rowSize(r)) {
-            val dd = abs(centerX(r, i) - x)
-            if (dd < d) { d = dd; best = i }
+    private fun centerX(i: Int, c: Int): Float {
+        val ln = lines.getOrNull(i) ?: return 0f
+        return when (ln.kind) {
+            Kind.CHIPS -> chipCx.getOrElse(c) { 800f }
+            Kind.HERO -> MARGIN + 80f + c * 190f
+            Kind.DOCK -> MARGIN + c * (tileW() + 18f * dens) + tileW() / 2
+            Kind.CARDS -> MARGIN + c * cardStep() + cardW() / 2 - (rowOff[ln.label ?: ""]?.t ?: 0f)
+            Kind.GRID -> MARGIN + c * gStep() + gW() / 2
         }
+    }
+
+    private fun nearest(i: Int, x: Float): Int {
+        val n = lines.getOrNull(i)?.items?.size ?: return 0
+        var best = 0; var d = Float.MAX_VALUE
+        for (c in 0 until n) { val dd = abs(centerX(i, c) - x); if (dd < d) { d = dd; best = c } }
         return best
     }
 
     /** 0 left, 1 right, 2 up, 3 down. [repeat] is the key's repeat count: held arrows speed up. */
     fun key(dir: Int, repeat: Int = 0): Boolean {
+        lastInput = SystemClock.uptimeMillis()
         fast = repeat > 0
         if (moveMode) {
             if (dir == 0 || dir == 1) moveBy(if (dir == 0) -1 else 1)
             return true
         }
+        val ln = line() ?: return true
+        val i0 = li; val c0 = col; val t0 = trendIx
         val steps = if (repeat > 12 && dir < 2) 2 else 1
-        val r0 = row; val c0 = col
-        repeat(steps) { step(dir) }
-        if (row != r0 || col != c0) { focusChanged(true); host?.onMove() }
-        return true
-    }
-
-    private fun step(dir: Int) {
-        val x = centerX(row, col)
-        when (dir) {
-            0 -> if (col > 0) col--
-            1 -> if (col < rowSize(row) - 1) col++
-            2 -> when {
-                row == -1 -> {}
-                row == 0 -> if (chips.isNotEmpty()) { row = -1; col = nearest(-1, x) }
-                else -> {
-                    var r = row - 1
-                    while (r > 0 && rowSize(r) == 0) r--
-                    if (r == 0 && dock.isEmpty()) r = -1
-                    if (rowSize(r) > 0) { row = r; col = nearest(r, x) }
-                }
-            }
-            3 -> {
-                var r = row + 1
-                while (r <= gridStart() + gridRows() && rowSize(r) == 0 && r < gridStart()) r++
-                if (rowSize(r) > 0) { row = r; col = nearest(r, x) }
+        repeat(steps) {
+            val x = centerX(li, col)
+            when (dir) {
+                0 -> if (col > 0) col-- else if (ln.kind == Kind.HERO && trends.size > 1) { trendIx = (trendIx - 1 + trends.size) % trends.size; trendSince = lastInput }
+                1 -> if (col < ln.items.size - 1) col++ else if (ln.kind == Kind.HERO && trends.size > 1) { trendIx = (trendIx + 1) % trends.size; trendSince = lastInput; col = 0 }
+                2 -> if (li > 0) { li--; col = nearest(li, x) }
+                3 -> if (li < lines.size - 1) { li++; col = nearest(li, x) }
             }
         }
+        if (li != i0 || col != c0 || trendIx != t0) { focusChanged(true); host?.onMove() }
+        return true
     }
 
     fun keyUp() { fast = false }
 
-    /** ⏪ and ⏩: first or last item of the row. */
     fun jumpEdge(end: Boolean) {
         if (moveMode) return
+        val n = line()?.items?.size ?: return
         val c0 = col
-        col = if (end) max(0, rowSize(row) - 1) else 0
+        col = if (end) n - 1 else 0
         if (col != c0) { focusChanged(true); host?.onMove() }
     }
 
     private fun moveBy(d: Int) {
-        val j = col + d
+        val c = col
+        val j = c + d
         if (j < 0 || j >= dock.size) return
-        val a = dock[col]; dock[col] = dock[j]; dock[j] = a
+        val a = dock[c]; dock[c] = dock[j]; dock[j] = a
         col = j
+        build()
         host?.onMove()
         invalidate()
     }
 
     fun activate() {
+        lastInput = SystemClock.uptimeMillis()
         if (moveMode) { finishMove(); return }
+        val ln = line() ?: return
         when (val cur = current()) {
             is Chip -> host?.onChip(cur)
-            is Item.App, is Item.Media, is Item.Recent -> startZoom(cur as Item)
+            is String -> trend()?.let { host?.onTrend(it, if (cur == "ver") 0 else 1) }
+            is Item.App, is Item.Card -> startZoom(cur as Item, ln)
             is Item -> host?.onOpen(cur)
         }
     }
 
     private fun animationsOn() = Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f
 
-    /** «Abrir con zoom»: the tile grows to fill the screen while the app starts. */
-    private fun startZoom(item: Item) {
-        if (!animationsOn() || pending != null) { host?.onOpen(item); return }
-        val y = rowY(row) - scroll.v
-        when {
-            row == 0 -> { val tw = dockTileW(); zoomFrom.set(48f + col * (tw + 18f), DOCK_Y, 48f + col * (tw + 18f) + tw, DOCK_Y + tw * 76f / 136f) }
-            isCont(row) -> { val x = 48f + col * CONT_STEP - contOff.v; zoomFrom.set(x, y, x + CONT_W, y + CONT_H) }
-            else -> { val x = GRID_X + col * GRID_STEP_X; zoomFrom.set(x, y, x + GRID_W, y + GRID_H) }
+    /** Screen rectangle (design units) of what has the focus. */
+    private fun focusRect(out: RectF) {
+        val ln = line() ?: return out.setEmpty()
+        val y = ln.y - scroll.v
+        when (ln.kind) {
+            Kind.DOCK -> { val x = MARGIN + col * (tileW() + 18f * dens); out.set(x, dockY(), x + tileW(), dockY() + tileH()) }
+            Kind.CARDS -> { val x = MARGIN + col * cardStep() - (rowOff[ln.label ?: ""]?.v ?: 0f); val cy = y + 26f * dens; out.set(x, cy, x + cardW(), cy + cardH()) }
+            Kind.GRID -> { val x = MARGIN + col * gStep(); out.set(x, y, x + gW(), y + gH()) }
+            Kind.HERO -> out.set(MARGIN + col * 190f, 280f, MARGIN + col * 190f + 170f, 320f)
+            Kind.CHIPS -> { val cx = chipCx.getOrElse(col) { 800f }; out.set(cx - 40f, 26f, cx + 40f, 64f) }
         }
+    }
+
+    /** Where the focused item is on screen, in pixels, for the bubble menu. */
+    fun anchor(): Rect {
+        focusRect(rect2)
+        return Rect(s(rect2.left).toInt(), s(rect2.top).toInt(), s(rect2.right).toInt(), s(rect2.bottom).toInt())
+    }
+
+    /** «Abrir con zoom»: the tile grows to fill the screen while the app starts. */
+    private fun startZoom(item: Item, ln: Line) {
+        if (!animationsOn() || pending != null) { host?.onOpen(item); return }
+        focusRect(zoomFrom)
         zoomColor = when (item) { is Item.App -> item.e.tile; else -> Ui.shade(itemColor(item), 0.4f) }
-        zoomArt = mediaArt(item)
+        zoomArt = when (item) { is Item.App -> item.e.banner ?: item.e.icon; is Item.Card -> img(item.s.image, 960); else -> null }
         zoom.v = 0f; zoom.t = 1f
         pending = item
         invalidate()
     }
 
-    /** Called when SalaTV comes back to the front, or when opening failed. */
-    fun clearZoom() {
-        zoom.snap(0f)
-        pending = null
-        invalidate()
-    }
+    fun clearZoom() { zoom.snap(0f); pending = null; invalidate() }
 
     fun menu() {
+        lastInput = SystemClock.uptimeMillis()
         if (moveMode || pending != null) return
-        val cur = current()
-        if (cur is Item) host?.onMenu(cur, row == 0)
+        when (val cur = current()) {
+            is Item -> host?.onMenu(cur, line()?.kind == Kind.DOCK, anchor())
+            is String -> trend()?.let { host?.onTrend(it, 2) }
+        }
     }
 
     fun startMove() {
-        if (row == 0 && dock.isNotEmpty()) { moveMode = true; invalidate() }
+        if (line()?.kind == Kind.DOCK) { moveMode = true; invalidate() }
     }
 
     private fun finishMove() {
@@ -398,20 +438,21 @@ class HomeView(context: Context) : View(context) {
         invalidate()
     }
 
-    /** Back: leave move mode, then go back to the start of the dock. False when there is nowhere to go. */
+    private fun home() {
+        li = lines.indexOfFirst { it.kind == Kind.DOCK }.takeIf { it >= 0 } ?: 0
+        col = 0
+        clamp()
+        focusChanged(true)
+    }
+
     fun back(): Boolean {
         if (moveMode) { finishMove(); return true }
-        if (row != 0 || col != 0) {
-            row = 0; col = 0; clamp(); focusChanged(true)
-            return true
-        }
+        val dockLine = lines.indexOfFirst { it.kind == Kind.DOCK }
+        if (li != dockLine || col != 0) { home(); return true }
         return false
     }
 
-    fun goHome() {
-        moveMode = false
-        row = 0; col = 0; clamp(); focusChanged(true)
-    }
+    fun goHome() { moveMode = false; home() }
 
     // ---------------------------------------------------------------- drawing
 
@@ -419,95 +460,105 @@ class HomeView(context: Context) : View(context) {
         val w = width.toFloat(); val h = height.toFloat()
         val ph = placeholder
         if (ph != null && chips.isEmpty()) {
-            rect.set(0f, 0f, w, h)
-            c.drawBitmap(ph, null, rect, bmp)
-            return
+            rect.set(0f, 0f, w, h); c.drawBitmap(ph, null, rect, bmp); return
         }
         val now = SystemClock.uptimeMillis()
         val dt = if (lastFrame == 0L) 16f else min(64f, (now - lastFrame).toFloat())
         lastFrame = now
         frameK = min(1f, (1f - exp(-dt / 95f)) * if (fast) 2.2f else 1f)
         var busy = scroll.step(frameK)
-        busy = contOff.step(frameK) or busy
+        rowOff.values.forEach { busy = it.step(frameK) or busy }
         busy = fade.step(frameK * 0.75f) or busy
         busy = mix.step(frameK * 0.75f) or busy
 
-        c.drawColor(pal.bg)
-        drawBg(c, bgPrev, 1f - fade.v)
-        drawBg(c, bgCur, fade.v)
-        if (pal.day) { fill.color = Ui.alpha(pal.bg, 0.5f); c.drawRect(0f, 0f, w, h, fill) }
+        // The whole background (blurred picture, day veil, shades, colour glow) is one pre-composed
+        // bitmap per focus: one full-screen draw per frame instead of seven.
+        rect.set(0f, 0f, w, h)
+        val curBack = backdrop(bgCur, colorCur)
+        if (fade.v < 0.99f) {
+            backdrop(bgPrev, colorPrev, prev = true)?.let { bmp.alpha = 255; c.drawBitmap(it, null, rect, bmp) }
+            bmp.alpha = (fade.v * 255).toInt()
+        } else bmp.alpha = 255
+        if (curBack != null) c.drawBitmap(curBack, null, rect, bmp) else c.drawColor(pal.bg)
+        bmp.alpha = 255
 
-        val heroA = (1f - scroll.v / 200f).coerceIn(0f, 1f)
-        if (heroA > 0.01f) drawHeroArt(c, heroA)
+        val moving = kenBurns && heroShowsTrend() && now - lastInput < 120_000 && scroll.v < 5f
+        drawHeroArt(c, now, moving)
 
-        if (shadeFor != pal.bg) {
-            shadeFor = pal.bg
-            leftShade = LinearGradient(0f, 0f, w * 0.66f, 0f, intArrayOf(Ui.alpha(pal.bg, .92f), Ui.alpha(pal.bg, .55f), Ui.alpha(pal.bg, 0f)), floatArrayOf(0f, .45f, 1f), Shader.TileMode.CLAMP)
-            bottomShade = LinearGradient(0f, h, 0f, h * .38f, Ui.alpha(pal.bg, .9f), Ui.alpha(pal.bg, 0f), Shader.TileMode.CLAMP)
-        }
-        shade.shader = leftShade; c.drawRect(0f, 0f, w, h, shade)
-        shade.shader = bottomShade; c.drawRect(0f, 0f, w, h, shade)
-        val gc = Ui.lerp(colorPrev, colorCur, mix.v)
-        shade.shader = RadialGradient(w * .25f, h * 1.05f, w * .55f, Ui.alpha(gc, if (pal.day) .28f else .42f), 0, Shader.TileMode.CLAMP)
-        c.drawRect(0f, 0f, w, h, shade)
-        shade.shader = null
-
+        // Everything below the top description scrolls; above it, only the description stays.
+        val clipTop = if (scroll.v > 2f) 250f - 24f else 0f
         c.save()
+        c.clipRect(0f, s(clipTop), w, h)
         c.translate(0f, -s(scroll.v))
-        drawHeroText(c, heroA)
-        drawShelf(c)
-        val tw = dockTileW(); val th = tw * 76f / 136f
-        for (i in dock.indices) {
-            val f = row == 0 && col == i
-            busy = tile(c, dock[i], 48f + i * (tw + 18f), DOCK_Y + (76f - th) / 2, tw, th, f, 1.13f, false) or busy
+        for ((i, ln) in lines.withIndex()) {
+            when (ln.kind) {
+                Kind.DOCK -> busy = drawDock(c, i, ln) or busy
+                Kind.CARDS -> busy = drawCards(c, i, ln) or busy
+                Kind.GRID -> busy = drawGrid(c, i, ln) or busy
+                else -> {}
+            }
         }
-        busy = drawCont(c) or busy
-        busy = drawGrid(c) or busy
         c.restore()
-
-        if (scroll.v > 1f) {
-            shade.shader = LinearGradient(0f, 0f, 0f, s(130f), Ui.alpha(pal.bg, min(1f, scroll.v / 150f) * .95f), Ui.alpha(pal.bg, 0f), Shader.TileMode.CLAMP)
-            c.drawRect(0f, 0f, w, s(130f), shade)
+        if (scroll.v > 2f) {
+            shade.shader = LinearGradient(0f, s(clipTop), 0f, s(clipTop + 40f), Ui.alpha(pal.bg, .9f), Ui.alpha(pal.bg, 0f), Shader.TileMode.CLAMP)
+            c.drawRect(0f, s(clipTop), w, s(clipTop + 40f), shade)
             shade.shader = null
         }
+        drawHeroText(c, compact = scroll.v > 2f)
+        // A band behind the clock and the chips, so the picture never makes them hard to read.
+        shade.shader = LinearGradient(0f, 0f, 0f, s(130f), Ui.alpha(pal.bg, .85f), Ui.alpha(pal.bg, 0f), Shader.TileMode.CLAMP)
+        c.drawRect(0f, 0f, w, s(130f), shade)
+        shade.shader = null
         busy = drawTop(c) or busy
         drawHints(c, w)
+        drawNotice(c, w, now)
         if (zoom.t > 0f) {
             busy = zoom.step(min(1f, frameK * 1.15f)) or busy
             drawZoom(c, w, h)
             if (pending != null && zoom.v > 0.96f) {
-                val p = pending
-                pending = null
+                val p = pending; pending = null
                 if (p != null) post { host?.onOpen(p) }
             }
         }
-        if (busy) postInvalidateOnAnimation()
+        // The slow zoom needs no more than 20 frames a second; the remote keeps priority.
+        if (busy) postInvalidateOnAnimation() else if (moving) postInvalidateDelayed(50)
     }
 
-    private fun drawZoom(c: Canvas, w: Float, h: Float) {
-        val t = zoom.v
-        val e = 1f - (1f - t) * (1f - t)
-        rect.set(s(zoomFrom.left) * (1 - e), s(zoomFrom.top) * (1 - e), s(zoomFrom.right) + (w - s(zoomFrom.right)) * e, s(zoomFrom.bottom) + (h - s(zoomFrom.bottom)) * e)
-        val r = s(12f) * (1 - e)
-        fill.color = zoomColor
-        c.drawRoundRect(rect, r, r, fill)
-        val art = zoomArt ?: return
-        c.save()
-        path.reset(); path.addRoundRect(rect, r, r, Path.Direction.CW)
-        c.clipPath(path)
-        bmp.alpha = 255
-        crop(c, art, rect, bmp)
-        c.restore()
-    }
+    private class Back(val src: Bitmap, val color: Int, val day: Boolean, val out: Bitmap)
+    private var backCur: Back? = null
+    private var backPrev: Back? = null
 
-    private fun drawBg(c: Canvas, b: Bitmap?, a: Float) {
-        if (b == null || a <= 0.01f) return
-        bmp.alpha = (a * 255).toInt()
-        bmp.colorFilter = if (pal.day) null else darken
-        rect.set(0f, 0f, width.toFloat(), height.toFloat())
-        c.drawBitmap(b, null, rect, bmp)
-        bmp.colorFilter = null
-        bmp.alpha = 255
+    /**
+     * Background for [b] and [color], composed once at a quarter of the screen (it is all blur and
+     * gradients, so the size does not show) and reused until the focus changes.
+     */
+    private fun backdrop(b: Bitmap?, color: Int, prev: Boolean = false): Bitmap? {
+        if (b == null || width == 0) return null
+        val cached = if (prev) backPrev else backCur
+        if (cached != null && cached.src === b && cached.color == color && cached.day == pal.day) return cached.out
+        if (!prev) {
+            val old = backCur
+            if (old != null && old.src === bgPrev) backPrev = old
+        }
+        val w = width / 4f; val h = height / 4f
+        val out = Bitmap.createBitmap(w.toInt(), h.toInt(), Bitmap.Config.RGB_565)
+        val c = Canvas(out)
+        val r = RectF(0f, 0f, w, h)
+        c.drawColor(pal.bg)
+        val p = Paint(Paint.FILTER_BITMAP_FLAG)
+        if (!pal.day) p.colorFilter = darken
+        c.drawBitmap(b, null, r, p)
+        val q = Paint()
+        if (pal.day) { q.color = Ui.alpha(pal.bg, 0.5f); c.drawRect(r, q) }
+        q.shader = LinearGradient(0f, 0f, w * 0.66f, 0f, intArrayOf(Ui.alpha(pal.bg, .94f), Ui.alpha(pal.bg, .6f), Ui.alpha(pal.bg, 0f)), floatArrayOf(0f, .45f, 1f), Shader.TileMode.CLAMP)
+        c.drawRect(r, q)
+        q.shader = LinearGradient(0f, h, 0f, h * .3f, Ui.alpha(pal.bg, .95f), Ui.alpha(pal.bg, 0f), Shader.TileMode.CLAMP)
+        c.drawRect(r, q)
+        q.shader = RadialGradient(w * .25f, h * 1.05f, w * .55f, Ui.alpha(color, if (pal.day) .25f else .38f), 0, Shader.TileMode.CLAMP)
+        c.drawRect(r, q)
+        val back = Back(b, color, pal.day, out)
+        if (prev) backPrev = back else backCur = back
+        return out
     }
 
     private fun crop(c: Canvas, b: Bitmap, r: RectF, p: Paint) {
@@ -523,177 +574,310 @@ class HomeView(context: Context) : View(context) {
         c.drawBitmap(b, src, r, p)
     }
 
-    /** The artwork, large on the right, fading into the background on the left and bottom. */
-    private fun drawHeroArt(c: Canvas, a: Float) {
-        val cur = current() as? Item ?: return
-        val art = mediaArt(cur) ?: return
-        val alpha = a * (0.35f + 0.65f * fade.v)
-        rect.set(s(452f), s(70f), s(936f), s(70f + 484f * 9f / 16f))
-        bmp.alpha = (alpha * 255).toInt()
-        if (art.width < art.height * 1.3f) {
-            val sz = s(150f)
-            rect2.set(rect.centerX() - sz / 2, rect.centerY() - sz / 2, rect.centerX() + sz / 2, rect.centerY() + sz / 2)
-            c.drawBitmap(art, null, rect2, bmp)
-            bmp.alpha = 255
+    /** The picture of what has the focus on the right, fading left and down; slowly zooming for trends. */
+    private fun drawHeroArt(c: Canvas, now: Long, moving: Boolean) {
+        val art = heroArt() ?: return
+        val small = art.width < art.height * 1.3f
+        val a = (if (scroll.v > 2f) 0.55f else 1f) * (0.35f + 0.65f * fade.v)
+        val bottom = heroBottom() + 10f
+        rect.set(s(400f), 0f, s(960f), s(bottom))
+        bmp.alpha = (a * 255).toInt()
+        if (small) {
+            val sz = s(140f)
+            rect2.set(s(700f) - sz / 2, s(200f) - sz / 2, s(700f) + sz / 2, s(200f) + sz / 2)
+            c.drawBitmap(art, null, rect2, bmp); bmp.alpha = 255
             return
         }
-        val save = c.saveLayer(rect, null)
-        crop(c, art, rect, bmp)
-        mask.shader = LinearGradient(rect.left, 0f, rect.left + rect.width() * .5f, 0f, 0, Color.BLACK, Shader.TileMode.CLAMP)
-        c.drawRect(rect, mask)
-        mask.shader = LinearGradient(0f, rect.bottom, 0f, rect.bottom - rect.height() * .4f, 0, Color.BLACK, Shader.TileMode.CLAMP)
-        c.drawRect(rect, mask)
-        c.restoreToCount(save)
+        // Crop and fade once per picture; every frame after that is a single bitmap draw. Doing the
+        // layer and the two masks per frame missed 40 % of frames on the TV.
+        val faded = fadedArt(art, rect.width().toInt(), rect.height().toInt())
+        c.save()
+        if (moving) {
+            val k = ((now - trendSince) % 12_000L) / 12_000f
+            c.scale(1f + 0.07f * k, 1f + 0.07f * k, rect.centerX() + s(40f), rect.centerY())
+        }
+        c.drawBitmap(faded, null, rect, bmp)
+        c.restore()
         bmp.alpha = 255
     }
 
-    private fun heroFor(cur: Any?): Hero = when (cur) {
-        is Item.App -> Hero(cur.e.category, cur.e.label, cur.note ?: "", if (moveMode) "← → para moverla · OK para terminar" else "OK para abrir · mantén OK para más opciones")
-        is Item.Fold -> Hero("Carpeta", cur.f.name, if (cur.apps.size == 1) "1 app" else "${cur.apps.size} apps", "OK para abrir")
-        is Item.Hidden -> Hero("Apps ocultas", "${cur.count} ocultas", "Siguen instaladas, solo no se ven aquí", "OK para verlas")
-        is Item.Media -> Hero("Continuar viendo · " + (cur.app?.label ?: ""), cur.w.title,
-            listOfNotNull(cur.w.sub.ifBlank { null }, cur.w.minutesLeft.takeIf { it > 0 }?.let { "quedan $it min" }).joinToString(" · "),
-            "OK para seguir · mantén OK para quitarla")
-        is Item.Recent -> Hero("Seguir con…", cur.e.label, "Abierta " + UsageRank.ago(cur.at), "OK para abrir")
-        is Chip -> Hero(if (cur.warn) "Aviso" else "SalaTV", cur.title, cur.desc, null)
-        else -> Hero("SalaTV", "Tu inicio", "Mantén OK sobre una app para fijarla en el dock", null)
+    private var fadedSrc: Bitmap? = null
+    private var faded: Bitmap? = null
+
+    private fun fadedArt(art: Bitmap, w: Int, h: Int): Bitmap {
+        val f = faded
+        if (f != null && fadedSrc === art && f.width == w / 2 && f.height == h / 2) return f
+        // Half the screen size is plenty for a picture that fades into the background.
+        val out = Bitmap.createBitmap(max(1, w / 2), max(1, h / 2), Bitmap.Config.ARGB_8888)
+        val c = Canvas(out)
+        val r = RectF(0f, 0f, out.width.toFloat(), out.height.toFloat())
+        crop(c, art, r, Paint(Paint.FILTER_BITMAP_FLAG))
+        val m = Paint().apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN) }
+        m.shader = LinearGradient(0f, 0f, r.width() * .45f, 0f, 0, Color.BLACK, Shader.TileMode.CLAMP)
+        c.drawRect(r, m)
+        m.shader = LinearGradient(0f, r.bottom, 0f, r.bottom - r.height() * .55f, 0, Color.BLACK, Shader.TileMode.CLAMP)
+        c.drawRect(r, m)
+        fadedSrc = art; faded = out
+        return out
     }
 
-    private fun drawHeroText(c: Canvas, a: Float) {
-        if (a <= 0.01f) return
-        val hero = heroFor(current())
-        txt.textAlign = Paint.Align.LEFT
-        txt.color = pal.fg
-        txt.typeface = Fonts.medium; txt.textSize = s(13f); txt.letterSpacing = 0.16f; txt.alpha = (a * 0.72f * 255).toInt()
-        c.drawText(ellipsize(hero.label.uppercase(Locale("es")), s(560f)), s(48f), s(126f), txt)
-        txt.typeface = Fonts.bold; txt.letterSpacing = -0.02f
-        var size = 58f
-        txt.textSize = s(size)
-        while (txt.measureText(hero.title) > s(560f) && size > 30f) { size -= 2f; txt.textSize = s(size) }
-        txt.alpha = (a * 255).toInt()
-        val base = 134f + size * 0.82f
-        c.drawText(ellipsize(hero.title, s(560f)), s(46f), s(base), txt)
-        txt.typeface = Fonts.light; txt.textSize = s(18f); txt.letterSpacing = 0f; txt.alpha = (a * 0.82f * 255).toInt()
-        if (hero.desc.isNotEmpty()) c.drawText(ellipsize(hero.desc, s(560f)), s(48f), s(base + 34f), txt)
-        val hint = hero.hint ?: return
-        txt.typeface = Fonts.regular; txt.textSize = s(14f); txt.alpha = (a * 255).toInt()
-        val tw = txt.measureText(hint)
-        val top = base + (if (hero.desc.isNotEmpty()) 56f else 24f)
-        rect.set(s(48f), s(top), s(48f) + tw + s(28f), s(top + 32f))
-        fill.color = pal.chip; fill.alpha = (Color.alpha(pal.chip) * a).toInt()
-        c.drawRoundRect(rect, rect.height() / 2, rect.height() / 2, fill)
-        c.drawText(hint, s(62f), s(top + 21f), txt)
-        txt.alpha = 255
+    private fun badge(c: Canvas, pkg: String, x: Float, base: Float, size: Float): Float {
+        val (name, bg, fg) = Services.badge(pkg)
+        txt.typeface = Fonts.bold; txt.textSize = s(size); txt.letterSpacing = 0f
+        val tw = txt.measureText(name)
+        rect2.set(s(x), s(base) - s(size) * 1.05f, s(x) + tw + s(size * 0.9f), s(base) + s(size) * 0.38f)
+        fill.color = bg
+        c.drawRoundRect(rect2, s(4f), s(4f), fill)
+        txt.color = fg
+        c.drawText(name, s(x) + s(size * 0.45f), s(base), txt)
+        return x + (tw / u) + size * 0.9f
     }
 
-    private fun drawShelf(c: Canvas) {
-        rect.set(s(24f), s(368f), s(936f), s(518f))
-        fill.color = pal.glass
-        c.drawRoundRect(rect, s(28f), s(28f), fill)
-        stroke.color = pal.glassLine; stroke.strokeWidth = s(1f)
-        c.drawRoundRect(rect, s(28f), s(28f), stroke)
-        stroke.color = Ui.alpha(Color.WHITE, if (pal.day) .8f else .35f)
-        c.drawLine(s(56f), s(368.6f), s(904f), s(368.6f), stroke)
-        if (dock.isEmpty()) {
-            txt.typeface = Fonts.light; txt.textSize = s(16f); txt.color = pal.fg; txt.alpha = 180
-            txt.textAlign = Paint.Align.CENTER
-            c.drawText("Mantén OK sobre una app y elige «Fijar en el dock»", s(480f), s(448f), txt)
-            txt.textAlign = Paint.Align.LEFT; txt.alpha = 255
+    private fun wrap(text: String, maxW: Float, maxLines: Int): List<String> {
+        val out = mutableListOf<String>()
+        var cur = ""
+        for (w in text.split(' ')) {
+            val t = if (cur.isEmpty()) w else "$cur $w"
+            if (txt.measureText(t) <= maxW) cur = t else {
+                if (cur.isNotEmpty()) out += cur
+                cur = w
+                if (out.size == maxLines) break
+            }
+        }
+        if (out.size < maxLines && cur.isNotEmpty()) out += cur
+        if (out.size == maxLines && out.joinToString(" ").length < text.length) out[maxLines - 1] = ellipsize(out[maxLines - 1] + "…", maxW)
+        return out.take(maxLines)
+    }
+
+    private class HeroInfo(val pkg: String?, val kicker: String, val title: String, val meta: String, val body: String, val button: String?)
+
+    private fun heroInfo(): HeroInfo? {
+        val cur = current()
+        return when {
+            cur is Item.Card -> HeroInfo(cur.s.pkg, if (cur.row == "season") "Temporada en Crunchyroll" else if (cur.s.isNew) "Episodio nuevo" else "Seguir viendo",
+                cur.s.title, listOfNotNull(cur.s.sub.ifBlank { null }, cur.s.minutesLeft.takeIf { it > 0 }?.let { "quedan $it min" }).joinToString(" · "),
+                if (cur.row == "season") cur.s.sub else "",
+                if (cur.row == "season") "OK para ver la serie" else if (cur.s.playheadSec > 60) "OK para seguir · min ${cur.s.playheadSec / 60}:${"%02d".format(cur.s.playheadSec % 60)}" else "OK para ver")
+            cur is Item.Pick -> HeroInfo(cur.t.pkgs.firstOrNull(), "Mi lista", cur.t.name,
+                listOf(cur.t.kind, cur.t.year, cur.t.ratingText).filter { it.isNotEmpty() }.joinToString(" · "), cur.t.overview,
+                if (cur.t.pkgs.isEmpty()) "Aún no está en tus apps" else "OK para ver en ${Services.name(cur.t.pkgs.first())}")
+            heroShowsTrend() -> trend()?.let { t ->
+                HeroInfo(t.pkgs.firstOrNull(), "Tendencia nº ${trendIx + 1} esta semana", t.name,
+                    listOf(t.kind, t.year, t.ratingText).filter { it.isNotEmpty() }.joinToString(" · "), t.overview, null)
+            }
+            cur is Chip -> HeroInfo(null, if (cur.warn) "Aviso" else "SalaTV", cur.title, "", cur.desc, null)
+            cur is Item.App -> HeroInfo(null, cur.e.category, cur.e.label, cur.note ?: "", "",
+                if (moveMode) "← → para moverla · OK para terminar" else "OK para abrir · mantén OK para más opciones")
+            cur is Item.Fold -> HeroInfo(null, "Carpeta", cur.f.name, if (cur.apps.size == 1) "1 app" else "${cur.apps.size} apps", "", "OK para abrir")
+            cur is Item.Hidden -> HeroInfo(null, "Apps ocultas", "${cur.count} ocultas", "Siguen instaladas, solo no se ven aquí", "", "OK para verlas")
+            else -> null
         }
     }
 
-    private fun drawCont(c: Canvas): Boolean {
-        if (!hasCont()) return false
-        var busy = false
-        txt.typeface = Fonts.regular; txt.textSize = s(15f); txt.color = pal.fg; txt.alpha = 180; txt.letterSpacing = 0f
-        c.drawText("Continuar viendo", s(48f), s(CONT_Y - 18f), txt)
+    private fun drawHeroText(c: Canvas, compact: Boolean) {
+        val info = heroInfo() ?: return
+        val x = MARGIN
+        var y = if (compact) 98f else 112f
+        txt.textAlign = Paint.Align.LEFT; txt.color = pal.fg
+        var kx = x
+        if (info.pkg != null) kx = badge(c, info.pkg, x, y, 11.5f) + 10f
+        txt.typeface = Fonts.medium; txt.textSize = s(12.5f); txt.letterSpacing = 0.14f; txt.color = pal.fg; txt.alpha = 190
+        c.drawText(ellipsize(info.kicker.uppercase(Locale("es")), s(520f)), s(kx), s(y), txt)
+        txt.alpha = 255; txt.letterSpacing = -0.02f; txt.typeface = Fonts.bold
+        var size = if (compact) 34f else 50f * min(1f, dens + 0.08f)
+        txt.textSize = s(size)
+        while (txt.measureText(info.title) > s(540f) && size > 26f) { size -= 2f; txt.textSize = s(size) }
+        y += size * 0.95f + 8f
+        c.drawText(ellipsize(info.title, s(540f)), s(x - 2f), s(y), txt)
+        txt.letterSpacing = 0f
+        if (info.meta.isNotEmpty()) {
+            y += 26f
+            txt.typeface = Fonts.regular; txt.textSize = s(15f); txt.alpha = 200
+            c.drawText(ellipsize(info.meta, s(540f)), s(x), s(y), txt)
+        }
+        if (!compact && info.body.isNotEmpty()) {
+            txt.typeface = Fonts.light; txt.textSize = s(15f); txt.alpha = 215
+            for (l in wrap(info.body, s(500f), 2)) { y += 22f; c.drawText(l, s(x), s(y), txt) }
+        }
         txt.alpha = 255
-        if (scroll.v + 540f < CONT_Y) return false
-        for (i in cont.indices) {
-            val x = 48f + i * CONT_STEP - contOff.v
-            if (x + CONT_W < 0f || x > 960f) continue
-            busy = card(c, cont[i], x, CONT_Y, row == 1 && col == i) or busy
+        if (compact) return
+        y += 22f
+        if (heroShowsTrend()) {
+            val t = trend() ?: return
+            val onHero = line()?.kind == Kind.HERO
+            val acc = itemColor(null)
+            val labels = listOf("▶  Ver en " + (t.pkgs.firstOrNull()?.let { Services.name(it) } ?: "su app"), if (t.key in mine) "✓  En mi lista" else "+  Mi lista")
+            var bx = x
+            labels.forEachIndexed { i, l ->
+                txt.typeface = Fonts.medium; txt.textSize = s(15f)
+                val bw = txt.measureText(l) / u + 36f
+                rect.set(s(bx), s(y), s(bx + bw), s(y + 38f))
+                val f = onHero && col == i
+                if (f) {
+                    glow.color = Ui.alpha(acc, 0.35f); glow.setShadowLayer(s(18f), 0f, 0f, Ui.alpha(acc, 0.8f))
+                    c.drawRoundRect(rect, rect.height() / 2, rect.height() / 2, glow)
+                    stroke.color = Ui.alpha(Color.WHITE, 0.85f); stroke.strokeWidth = s(1.5f)
+                    c.drawRoundRect(rect, rect.height() / 2, rect.height() / 2, stroke)
+                } else {
+                    fill.color = if (pal.day) 0x22000000 else 0x24FFFFFF
+                    c.drawRoundRect(rect, rect.height() / 2, rect.height() / 2, fill)
+                }
+                txt.color = pal.fg
+                c.drawText(l, s(bx + 18f), s(y + 25f), txt)
+                bx += bw + 12f
+            }
+            // Dots: one per trend, the current one longer.
+            var dx = x
+            val dy = y + 56f
+            for (i in trends.indices) {
+                val wd = if (i == trendIx) 22f else 7f
+                rect.set(s(dx), s(dy), s(dx + wd), s(dy + 7f))
+                fill.color = Ui.alpha(pal.fg, if (i == trendIx) 0.95f else 0.35f)
+                c.drawRoundRect(rect, s(3.5f), s(3.5f), fill)
+                dx += wd + 6f
+            }
+        } else if (info.button != null) {
+            txt.typeface = Fonts.regular; txt.textSize = s(14f)
+            val tw = txt.measureText(info.button) / u
+            rect.set(s(x), s(y), s(x + tw + 28f), s(y + 32f))
+            fill.color = pal.chip
+            c.drawRoundRect(rect, rect.height() / 2, rect.height() / 2, fill)
+            txt.color = pal.fg
+            c.drawText(info.button, s(x + 14f), s(y + 21f), txt)
+        }
+    }
+
+    /** «Halo del color de la app»: a soft glow of [color] and a thin light ring, never a white fill. */
+    private fun halo(c: Canvas, r: RectF, radius: Float, color: Int, sc: Float) {
+        glow.color = Ui.alpha(color, 0.9f)
+        glow.setShadowLayer(s(26f), 0f, 0f, Ui.alpha(color, 0.85f))
+        c.drawRoundRect(r, radius, radius, glow)
+        glow.clearShadowLayer()
+    }
+
+    private fun ring(c: Canvas, r: RectF, radius: Float, sc: Float) {
+        stroke.color = Ui.alpha(if (pal.day) Color.BLACK else Color.WHITE, 0.9f); stroke.strokeWidth = s(2f) / sc
+        c.drawRoundRect(r, radius, radius, stroke)
+    }
+
+    private fun drawDock(c: Canvas, i: Int, ln: Line): Boolean {
+        rect.set(s(24f), s(heroBottom()), s(936f), s(shelfBottom()))
+        fill.color = pal.glass
+        c.drawRoundRect(rect, s(26f), s(26f), fill)
+        stroke.color = pal.glassLine; stroke.strokeWidth = s(1f)
+        c.drawRoundRect(rect, s(26f), s(26f), stroke)
+        var busy = false
+        val tw = tileW(); val th = tileH()
+        for ((k, it) in ln.items.withIndex()) {
+            busy = tile(c, it as Item, MARGIN + k * (tw + 18f * dens), dockY() + (76f * dens - th) / 2, tw, th, li == i && col == k, 1.1f, false) or busy
         }
         return busy
     }
 
-    /** A «Continuar viendo» card: picture, app, title, episode and how far it got. */
+    private fun drawCards(c: Canvas, i: Int, ln: Line): Boolean {
+        txt.typeface = Fonts.medium; txt.textSize = s(15f * dens); txt.color = pal.fg; txt.alpha = 190; txt.letterSpacing = 0f
+        c.drawText(ln.label ?: "", s(MARGIN), s(ln.y + 16f * dens), txt)
+        txt.alpha = 255
+        val off = rowOff.getOrPut(ln.label ?: "") { Anim(0f) }.v
+        var busy = false
+        for ((k, it) in ln.items.withIndex()) {
+            val x = MARGIN + k * cardStep() - off
+            if (x + cardW() < 0f || x > 960f) continue
+            busy = card(c, it as Item, x, ln.y + 26f * dens, li == i && col == k) or busy
+        }
+        return busy
+    }
+
+    private fun cardImage(item: Item): Bitmap? = when (item) {
+        is Item.Card -> img(item.s.image, 420)
+        is Item.Pick -> img(tmdb(item.t.backdrop, "w300"), 300) ?: img(tmdb(item.t.poster, "w342"), 300)
+        else -> null
+    }
+
+    /** A 16:9 card: picture, service, title, episode, progress and «Nuevo». */
     private fun card(c: Canvas, item: Item, x: Float, y: Float, focused: Boolean): Boolean {
         val a = scales.getOrPut(item.key) { Anim(1f) }
-        a.t = if (focused) 1.08f else 1f
+        a.t = if (focused) 1.07f else 1f
         val busy = a.step(frameK)
-        val X = s(x); val Y = s(y); val W = s(CONT_W); val H = s(CONT_H)
-        val r = s(12f)
+        val X = s(x); val Y = s(y); val W = s(cardW()); val H = s(cardH())
+        val r = s(11f)
         c.save()
         c.scale(a.v, a.v, X + W / 2, Y + H / 2)
         rect.set(X, Y, X + W, Y + H)
-        shadow.color = pal.bg
-        shadow.setShadowLayer(if (focused) s(20f) else s(7f), 0f, if (focused) s(10f) else s(4f), if (pal.day) 0x40000000 else 0x99000000.toInt())
-        c.drawRoundRect(rect, r, r, shadow)
+        val color = itemColor(item)
+        if (focused) halo(c, rect, r, color, a.v)
         c.save()
-        path.reset(); path.addRoundRect(rect, r, r, Path.Direction.CW)
-        c.clipPath(path)
-        fill.color = Ui.shade(itemColor(item), 0.35f)
-        c.drawRect(rect, fill)
-        mediaArt(item)?.let { crop(c, it, rect, bmp) }
-        if (item is Item.Media) {
-            fill.color = Color.BLACK
-            fill.shader = LinearGradient(0f, rect.bottom, 0f, rect.top + rect.height() * 0.3f, 0xE6000000.toInt(), 0, Shader.TileMode.CLAMP)
-            c.drawRect(rect, fill); fill.shader = null
-            val app = item.app?.label ?: ""
-            if (app.isNotEmpty()) {
-                txt.typeface = Fonts.medium; txt.textSize = s(10.5f)
-                val bw = txt.measureText(app) + s(14f)
-                rect2.set(rect.left + s(8f), rect.top + s(8f), rect.left + s(8f) + bw, rect.top + s(26f))
-                fill.color = 0xB3000000.toInt(); c.drawRoundRect(rect2, s(9f), s(9f), fill)
-                txt.color = Color.WHITE; c.drawText(app, rect2.left + s(7f), rect2.bottom - s(5.5f), txt)
-            }
-            txt.color = Color.WHITE
-            val hasSub = item.w.sub.isNotBlank()
-            txt.typeface = Fonts.bold; txt.textSize = s(14f)
-            c.drawText(ellipsize(item.w.title, W - s(20f)), rect.left + s(10f), rect.bottom - s(if (hasSub) 26f else 13f), txt)
-            if (hasSub) {
-                txt.typeface = Fonts.regular; txt.textSize = s(11f); txt.alpha = 210
-                c.drawText(ellipsize(item.w.sub, W - s(20f)), rect.left + s(10f), rect.bottom - s(11f), txt)
-                txt.alpha = 255
-            }
-            if (item.w.dur > 0) {
-                fill.color = 0x40FFFFFF
-                c.drawRect(rect.left, rect.bottom - s(4f), rect.right, rect.bottom, fill)
-                fill.color = Ui.LAMP
-                c.drawRect(rect.left, rect.bottom - s(4f), rect.left + rect.width() * item.w.progress, rect.bottom, fill)
-            }
+        fill.color = Ui.shade(color, 0.3f); c.drawRoundRect(rect, r, r, fill)
+        // Rounded picture through a shader: clipping to a path is slow on the TV's GPU.
+        cardImage(item)?.let { b ->
+            val scale = max(rect.width() / b.width, rect.height() / b.height)
+            m.setScale(scale, scale)
+            m.postTranslate(rect.left + (rect.width() - b.width * scale) / 2, rect.top + (rect.height() - b.height * scale) / 2)
+            val sh = BitmapShader(b, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+            sh.setLocalMatrix(m)
+            fill.color = Color.BLACK; fill.shader = sh
+            c.drawRoundRect(rect, r, r, fill); fill.shader = null
+        }
+        fill.color = Color.BLACK
+        fill.shader = LinearGradient(0f, rect.bottom, 0f, rect.top + rect.height() * .25f, 0xE6000000.toInt(), 0, Shader.TileMode.CLAMP)
+        c.drawRoundRect(rect, r, r, fill); fill.shader = null
+        val (title, sub, prog, isNew, pkg) = when (item) {
+            is Item.Card -> Quint(item.s.title, if (item.row == "season") "" else item.s.sub, item.s.progress, item.s.isNew, item.s.pkg)
+            is Item.Pick -> Quint(item.t.name, listOf(item.t.kind, item.t.ratingText).filter { it.isNotEmpty() }.joinToString(" · "), 0f, false, item.t.pkgs.firstOrNull())
+            else -> Quint("", "", 0f, false, null)
+        }
+        if (pkg != null) badge(c, pkg, x + 8f, y + 20f, 10f)
+        if (isNew) {
+            txt.typeface = Fonts.bold; txt.textSize = s(10.5f)
+            val tw = txt.measureText("Nuevo")
+            rect2.set(rect.right - tw - s(18f), rect.top + s(8f), rect.right - s(8f), rect.top + s(24f))
+            fill.color = Ui.LAMP; c.drawRoundRect(rect2, s(4f), s(4f), fill)
+            txt.color = Ui.INK; c.drawText("Nuevo", rect2.left + s(5f), rect2.bottom - s(4.5f), txt)
+        }
+        txt.color = Color.WHITE
+        txt.typeface = Fonts.bold; txt.textSize = s(14f * dens)
+        c.drawText(ellipsize(title, W - s(18f)), rect.left + s(9f), rect.bottom - s(if (sub.isNotEmpty()) 24f else 12f) * dens, txt)
+        if (sub.isNotEmpty()) {
+            txt.typeface = Fonts.regular; txt.textSize = s(11f * dens); txt.alpha = 215
+            c.drawText(ellipsize(sub, W - s(18f)), rect.left + s(9f), rect.bottom - s(10f) * dens, txt)
+            txt.alpha = 255
+        }
+        if (prog > 0f) {
+            val bl = rect.left + s(8f); val br = rect.right - s(8f); val by = rect.bottom - s(6f)
+            rect2.set(bl, by - s(3.5f), br, by)
+            fill.color = 0x40FFFFFF; c.drawRoundRect(rect2, s(2f), s(2f), fill)
+            rect2.right = bl + (br - bl) * prog
+            fill.color = Ui.LAMP; c.drawRoundRect(rect2, s(2f), s(2f), fill)
         }
         c.restore()
-        if (focused) {
-            stroke.color = pal.ring; stroke.strokeWidth = s(3f) / a.v
-            c.drawRoundRect(rect, r, r, stroke)
-        }
+        if (focused) ring(c, rect, r, a.v)
         c.restore()
-        val note = when (item) {
-            is Item.Media -> UsageRank.ago(item.w.at) + (item.w.minutesLeft.takeIf { it > 0 }?.let { " · quedan $it min" } ?: "")
-            is Item.Recent -> item.e.label + " · " + UsageRank.ago(item.at)
+        val meta = when (item) {
+            is Item.Card -> if (item.row == "season") "" else listOfNotNull(if (item.s.at > 0) UsageRank.ago(item.s.at) else null,
+                item.s.minutesLeft.takeIf { it > 0 }?.let { "quedan $it min" }).joinToString(" · ")
+            is Item.Pick -> if (item.t.pkgs.isEmpty()) "Aún no está en tus apps" else "En " + item.t.pkgs.joinToString(", ") { Services.name(it) }
             else -> ""
         }
-        txt.typeface = Fonts.regular; txt.textSize = s(12f); txt.color = pal.fg; txt.alpha = if (focused) 230 else 150
-        c.drawText(ellipsize(note, W), X, Y + H + H * (a.v - 1f) / 2 + s(19f), txt)
-        txt.alpha = 255
+        if (meta.isNotEmpty()) {
+            txt.typeface = Fonts.regular; txt.textSize = s(11.5f * dens); txt.color = pal.fg; txt.alpha = if (focused) 220 else 140
+            c.drawText(ellipsize(meta, W), X, Y + H + H * (a.v - 1f) / 2 + s(17f * dens), txt)
+            txt.alpha = 255
+        }
         return busy
     }
 
-    private fun drawGrid(c: Canvas): Boolean {
-        if (grid.isEmpty()) return false
+    private data class Quint(val a: String, val b: String, val c: Float, val d: Boolean, val e: String?)
+
+    private fun drawGrid(c: Canvas, i: Int, ln: Line): Boolean {
+        if (ln.label != null) {
+            txt.typeface = Fonts.medium; txt.textSize = s(15f * dens); txt.color = pal.fg; txt.alpha = 190
+            c.drawText(ln.label, s(MARGIN), s(ln.y - 14f * dens), txt)
+            txt.alpha = 255
+        }
+        if (ln.y + gH() < scroll.v - 40f || ln.y > scroll.v + 560f) return false
         var busy = false
-        val y0 = gridY0()
-        txt.typeface = Fonts.regular; txt.textSize = s(15f); txt.color = pal.fg; txt.alpha = 180; txt.letterSpacing = 0f
-        c.drawText(gridLabel, s(GRID_X), s(y0 - 22f), txt)
-        txt.alpha = 255
-        val top = scroll.v - 80f; val bottom = scroll.v + 560f
-        for (i in grid.indices) {
-            val r = i / COLS; val cc = i % COLS
-            val y = y0 + r * GRID_PITCH
-            if (y + GRID_H < top || y > bottom) continue
-            busy = tile(c, grid[i], GRID_X + cc * GRID_STEP_X, y, GRID_W, GRID_H, row == r + gridStart() && col == cc, 1.1f, grid[i] !is Item.App) or busy
+        for ((k, it) in ln.items.withIndex()) {
+            busy = tile(c, it as Item, MARGIN + k * gStep(), ln.y, gW(), gH(), li == i && col == k, 1.1f, it !is Item.App) or busy
         }
         return busy
     }
@@ -710,9 +894,8 @@ class HomeView(context: Context) : View(context) {
         c.save()
         c.scale(sc, sc, cx, cy)
         rect.set(X, Y, X + W, Y + H)
-        shadow.color = pal.bg
-        shadow.setShadowLayer(if (focused) s(20f) else s(7f), 0f, if (focused) s(10f) else s(4f), if (pal.day) 0x40000000 else 0x99000000.toInt())
-        c.drawRoundRect(rect, r, r, shadow)
+        // Only the focused tile gets a blurred halo; a blur per tile cost frames on the TV.
+        if (focused) halo(c, rect, r, itemColor(item), sc)
         when (item) {
             is Item.App -> appFace(c, item.e, r)
             is Item.Fold -> folderFace(c, item, r)
@@ -720,12 +903,7 @@ class HomeView(context: Context) : View(context) {
             else -> {}
         }
         if (focused) {
-            fill.color = Color.BLACK
-            fill.shader = LinearGradient(rect.left, rect.top, rect.left + rect.width() * .6f, rect.bottom, 0x40FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
-            c.drawRoundRect(rect, r, r, fill)
-            fill.shader = null
-            stroke.color = pal.ring; stroke.strokeWidth = s(3f) / sc
-            c.drawRoundRect(rect, r, r, stroke)
+            ring(c, rect, r, sc)
             if (moveMode) {
                 stroke.color = Ui.LAMP; stroke.strokeWidth = s(3f)
                 val ay = rect.centerY(); val d = s(9f)
@@ -737,15 +915,10 @@ class HomeView(context: Context) : View(context) {
         }
         c.restore()
         if (focused || alwaysName) {
-            val name = when (item) {
-                is Item.App -> item.e.label
-                is Item.Fold -> item.f.name
-                is Item.Hidden -> "Apps ocultas"
-                else -> ""
-            }
-            txt.typeface = Fonts.medium; txt.textSize = s(13f); txt.color = pal.fg; txt.alpha = if (focused) 255 else 170
+            val name = when (item) { is Item.App -> item.e.label; is Item.Fold -> item.f.name; is Item.Hidden -> "Apps ocultas"; else -> "" }
+            txt.typeface = Fonts.medium; txt.textSize = s(12.5f * dens); txt.color = pal.fg; txt.alpha = if (focused) 255 else 170
             txt.textAlign = Paint.Align.CENTER
-            c.drawText(ellipsize(name, W * 1.25f), cx, Y + H + H * (sc - 1f) / 2 + s(20f), txt)
+            c.drawText(ellipsize(name, W * 1.25f), cx, Y + H + H * (sc - 1f) / 2 + s(18f * dens), txt)
             txt.textAlign = Paint.Align.LEFT; txt.alpha = 255
         }
         return busy
@@ -759,7 +932,6 @@ class HomeView(context: Context) : View(context) {
             m.setScale(scale, scale)
             m.postTranslate(rect.left + (rect.width() - b.width * scale) / 2, rect.top + (rect.height() - b.height * scale) / 2)
             sh.setLocalMatrix(m)
-            // Opaque: other drawing (the hint pill) leaves the shared paint almost transparent.
             fill.color = Color.BLACK
             fill.shader = sh
             c.drawRoundRect(rect, r, r, fill)
@@ -785,9 +957,7 @@ class HomeView(context: Context) : View(context) {
             val x = box.left + pad + (i % 2) * (cw + pad); val y = box.top + pad + (i / 2) * (ch + pad)
             rect.set(x, y, x + cw, y + ch)
             val art = e.banner
-            if (art != null) crop(c, art, rect, bmp) else {
-                fill.color = e.tile; c.drawRoundRect(rect, s(3f), s(3f), fill)
-            }
+            if (art != null) crop(c, art, rect, bmp) else { fill.color = e.tile; c.drawRoundRect(rect, s(3f), s(3f), fill) }
         }
         rect.set(box)
     }
@@ -801,6 +971,20 @@ class HomeView(context: Context) : View(context) {
         txt.textAlign = Paint.Align.LEFT
     }
 
+    private fun drawZoom(c: Canvas, w: Float, h: Float) {
+        val e = 1f - (1f - zoom.v) * (1f - zoom.v)
+        rect.set(s(zoomFrom.left) * (1 - e), s(zoomFrom.top) * (1 - e), s(zoomFrom.right) + (w - s(zoomFrom.right)) * e, s(zoomFrom.bottom) + (h - s(zoomFrom.bottom)) * e)
+        val r = s(12f) * (1 - e)
+        fill.color = zoomColor
+        c.drawRoundRect(rect, r, r, fill)
+        val art = zoomArt ?: return
+        c.save()
+        path.reset(); path.addRoundRect(rect, r, r, Path.Direction.CW)
+        c.clipPath(path)
+        crop(c, art, rect, bmp)
+        c.restore()
+    }
+
     private fun greeting(): String {
         val h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
         val g = when (h) { in 5..11 -> "Buenos días"; in 12..19 -> "Buenas tardes"; else -> "Buenas noches" }
@@ -811,77 +995,89 @@ class HomeView(context: Context) : View(context) {
         var busy = false
         val now = Date()
         txt.textAlign = Paint.Align.LEFT; txt.color = pal.fg; txt.letterSpacing = 0f
-        txt.typeface = Fonts.medium; txt.textSize = s(30f)
+        txt.typeface = Fonts.medium; txt.textSize = s(26f)
         val clock = clockFmt.format(now)
-        c.drawText(clock, s(46f), s(57f), txt)
+        c.drawText(clock, s(46f), s(54f), txt)
         val cw = txt.measureText(clock)
-        txt.typeface = Fonts.light; txt.textSize = s(15f); txt.alpha = 185
-        c.drawText(greeting() + " · " + dateFmt.format(now), s(46f) + cw + s(14f), s(55f), txt)
+        txt.typeface = Fonts.light; txt.textSize = s(14f); txt.alpha = 185
+        c.drawText(greeting() + " · " + dateFmt.format(now), s(46f) + cw + s(12f), s(52f), txt)
         txt.alpha = 255
-
         if (chipCx.size != chips.size) chipCx = FloatArray(chips.size)
         var right = s(914f)
+        val chipLine = lines.indexOfFirst { it.kind == Kind.CHIPS }
         for (i in chips.indices.reversed()) {
             val ch = chips[i]
-            val focused = row == -1 && col == i
-            txt.typeface = Fonts.medium; txt.textSize = s(14f)
+            val focused = li == chipLine && col == i
+            txt.typeface = Fonts.medium; txt.textSize = s(13f)
             val wide = ch.label.isNotEmpty() && ch.icon != AVATAR
-            val w = if (wide) s(15f) + (if (ch.icon > 0) s(26f) else 0f) + txt.measureText(ch.label) + s(16f) else s(38f)
-            rect.set(right - w, s(26f), right, s(64f))
+            val w = if (wide) s(13f) + (if (ch.icon > 0) s(24f) else 0f) + txt.measureText(ch.label) + s(14f) else s(34f)
+            rect.set(right - w, s(28f), right, s(62f))
             chipCx[i] = rect.centerX() / u
             val a = scales.getOrPut("c:" + ch.id) { Anim(1f) }
-            a.t = if (focused) 1.08f else 1f
+            a.t = if (focused) 1.06f else 1f
             busy = a.step(frameK) or busy
             c.save()
             c.scale(a.v, a.v, rect.centerX(), rect.centerY())
             val rad = rect.height() / 2
             if (ch.icon == AVATAR) {
+                if (focused) halo(c, rect, rad, ch.color, a.v)
                 fill.color = ch.color
                 c.drawCircle(rect.centerX(), rect.centerY(), rad, fill)
-                if (focused) { stroke.color = pal.fg; stroke.strokeWidth = s(3f); c.drawCircle(rect.centerX(), rect.centerY(), rad + s(3f), stroke) }
-                txt.textAlign = Paint.Align.CENTER; txt.typeface = Fonts.bold; txt.textSize = s(17f); txt.color = Ui.INK
-                c.drawText(ch.label, rect.centerX(), rect.centerY() + s(6f), txt)
+                if (focused) ring(c, rect, rad, a.v)
+                txt.textAlign = Paint.Align.CENTER; txt.typeface = Fonts.bold; txt.textSize = s(15f); txt.color = Ui.INK
+                c.drawText(ch.label, rect.centerX(), rect.centerY() + s(5.5f), txt)
                 txt.textAlign = Paint.Align.LEFT
             } else {
-                fill.color = when {
-                    focused -> pal.fg
-                    ch.warn -> Ui.alpha(Ui.WARN, if (pal.day) .55f else .25f)
-                    else -> pal.chip
+                val acc = if (ch.warn) Ui.WARN else Ui.LAMP
+                if (focused) {
+                    halo(c, rect, rad, acc, a.v)
+                    fill.color = Ui.alpha(acc, 0.35f); c.drawRoundRect(rect, rad, rad, fill)
+                    ring(c, rect, rad, a.v)
+                } else {
+                    fill.color = if (ch.warn) Ui.alpha(Ui.WARN, if (pal.day) .55f else .25f) else pal.chip
+                    c.drawRoundRect(rect, rad, rad, fill)
                 }
-                c.drawRoundRect(rect, rad, rad, fill)
-                val fg = when {
-                    focused -> pal.bg
-                    ch.warn && !pal.day -> Ui.WARN
-                    else -> pal.fg
-                }
+                val fg = if (ch.warn && !pal.day && !focused) Ui.WARN else pal.fg
                 if (wide) {
-                    var tx = rect.left + s(15f)
-                    if (ch.icon > 0) { icon(c, ch.icon, tx + s(9f), rect.centerY(), s(18f), fg); tx += s(26f) }
-                    txt.color = fg; txt.typeface = Fonts.medium; txt.textSize = s(14f)
-                    c.drawText(ch.label, tx, rect.centerY() + s(5f), txt)
-                } else icon(c, ch.icon, rect.centerX(), rect.centerY(), s(18f), fg)
+                    var tx = rect.left + s(13f)
+                    if (ch.icon > 0) { icon(c, ch.icon, tx + s(8f), rect.centerY(), s(16f), fg); tx += s(24f) }
+                    txt.color = fg; txt.typeface = Fonts.medium; txt.textSize = s(13f)
+                    c.drawText(ch.label, tx, rect.centerY() + s(4.5f), txt)
+                } else icon(c, ch.icon, rect.centerX(), rect.centerY(), s(16f), fg)
             }
             c.restore()
-            right -= w + s(10f)
+            right -= w + s(8f)
         }
         return busy
     }
 
     private fun drawHints(c: Canvas, w: Float) {
-        txt.textAlign = Paint.Align.CENTER; txt.typeface = Fonts.regular; txt.textSize = s(13f); txt.color = pal.fg
-        if (moveMode) {
-            val t = "← →  mover      OK  terminar"
-            val tw = txt.measureText(t)
-            rect.set(w / 2 - tw / 2 - s(18f), s(500f), w / 2 + tw / 2 + s(18f), s(530f))
-            fill.color = Ui.LAMP
-            c.drawRoundRect(rect, rect.height() / 2, rect.height() / 2, fill)
-            txt.color = Ui.INK
-            c.drawText(t, w / 2, s(520f), txt)
-        } else if (scroll.v < 4f && (grid.isNotEmpty() || hasCont()) && row <= 0) {
-            txt.alpha = 140
-            c.drawText(if (hasCont()) "▾  Continuar viendo" else "▾  Todas tus apps", w / 2, s(533f), txt)
-        }
-        txt.alpha = 255; txt.textAlign = Paint.Align.LEFT
+        if (!moveMode) return
+        txt.textAlign = Paint.Align.CENTER; txt.typeface = Fonts.regular; txt.textSize = s(13f)
+        val t = "← →  mover      OK  terminar"
+        val tw = txt.measureText(t)
+        rect.set(w / 2 - tw / 2 - s(18f), s(500f), w / 2 + tw / 2 + s(18f), s(530f))
+        fill.color = Ui.LAMP
+        c.drawRoundRect(rect, rect.height() / 2, rect.height() / 2, fill)
+        txt.color = Ui.INK
+        c.drawText(t, w / 2, s(520f), txt)
+        txt.textAlign = Paint.Align.LEFT
+    }
+
+    private fun drawNotice(c: Canvas, w: Float, now: Long) {
+        val t = noticeText ?: return
+        if (now > noticeUntil) { noticeText = null; return }
+        txt.typeface = Fonts.medium; txt.textSize = s(14f); txt.textAlign = Paint.Align.CENTER
+        val tw = txt.measureText(t)
+        rect.set(w / 2 - tw / 2 - s(18f), s(74f), w / 2 + tw / 2 + s(18f), s(104f))
+        fill.color = if (pal.day) 0xF2FFFFFF.toInt() else 0xF21C212C.toInt()
+        c.drawRoundRect(rect, rect.height() / 2, rect.height() / 2, fill)
+        stroke.color = Ui.LAMP; stroke.strokeWidth = s(1.5f)
+        c.drawRoundRect(rect, rect.height() / 2, rect.height() / 2, stroke)
+        txt.color = pal.fg
+        c.drawText(t, w / 2, s(94f), txt)
+        txt.textAlign = Paint.Align.LEFT
+        postInvalidateDelayed(500)
     }
 
     private fun icon(c: Canvas, type: Int, cx: Float, cy: Float, size: Float, color: Int) {
@@ -927,7 +1123,6 @@ class HomeView(context: Context) : View(context) {
         return s.substring(0, n.coerceAtLeast(0)).trimEnd() + "…"
     }
 
-    /** A half-size picture of the current home, for the next cold start. */
     fun snapshot(): Bitmap? {
         if (width == 0 || chips.isEmpty() || pending != null || zoom.v > 0f) return null
         val b = Bitmap.createBitmap(width / 2, height / 2, Bitmap.Config.RGB_565)

@@ -83,6 +83,30 @@ Busca en la red las teles con la depuración activa, dice qué modelo y sistema 
 | Google TV y Android TV | `Platform` | `cmd package set-home-activity`, como Free My TV. |
 | Limpieza para cada modelo | `ListsActivity`, `assets/listas` | Las 158 listas de CleanYourTV (MIT); `tools/copy_lists.py` las actualiza. |
 
+### Versión 0.3
+
+| Idea | Dónde | Nota |
+|---|---|---|
+| Foco con halo del color de la app | `HomeView.halo`, `Ui.halo` | Nada de relleno blanco; el texto no cambia de color. |
+| Menú en burbuja junto a la app | `Ui.bubble` | 4 opciones y el resto en «Más…». |
+| Panel rápido en columna estrecha, listas finas | `Ui.page(side)`, `Ui.row` | 300 dp; filas de 44 dp. |
+| Tamaño del inicio | Ajustes › Tamaño del inicio | Compacto, normal, grande. |
+| Carrusel de tendencias | `Tmdb.refreshTrending`, `HomeView` | Tendencias de la semana en TMDB que están en tus apps en tu país (datos de JustWatch). ← → para pasar; ☰ abre la ficha. |
+| Ficha del título | `TitleActivity` | Sinopsis, temporadas, dónde verlo, tráiler en SmartTube, Mi lista. |
+| Nota en las tarjetas | `Title.ratingText` | TMDB no dice si algo está en 4K/HDR en cada servicio, así que eso no sale. |
+| Fondo que se mueve | `HomeView.drawHeroArt` | Se para tras 2 minutos sin tocar el mando. |
+| Seguir viendo: capítulos | `Feed`, `Crunchy.continueWatching` | Crunchyroll con tu cuenta (capítulo exacto y punto) + lo que veas en esta tele. Nunca apps. |
+| Aviso de episodio nuevo | `Feed.fresh`, `HomeView.notice` | Crunchyroll: el siguiente episodio salió esta semana. |
+| Cada perfil, su Seguir viendo | `Crunchy.profileFor`, `Watching` | Perfil de Crunchyroll por perfil de SalaTV. |
+| Al encender: seguir donde lo dejé | `ResumePromptActivity` | Ajustes › Al encender. |
+| Buscar con dónde está | `SearchActivity` | Pósteres con las apps de cada título. |
+| Anime de la temporada | `Crunchy.seasonal` | Fila con los simulcast más populares. |
+| Mi lista | `MyList` | Por perfil; revisa una vez al día dónde está cada título. |
+
+**Claves:** el token de lectura de TMDB va en `local.properties` (`tmdb.token=…`, fuera del repositorio) y la compilación lo mete en la app. Crunchyroll se conecta en Ajustes › Servicios, o desde el PC con `.\tools\claves.ps1`, que pide la contraseña oculta; SalaTV guarda solo el token de sesión.
+
+**Crunchyroll no es oficial:** SalaTV entra como la app de Android TV, con las credenciales que mantiene al día el proyecto crunchyroll-rs. Si Crunchyroll las cambia, deja de funcionar hasta actualizarlas (`Crunchy.BASIC`).
+
 ## Probado en la tele (21/10/2026)
 
 - Instalación con `instalar.ps1`, copia y vuelta atrás automática.

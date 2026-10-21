@@ -59,16 +59,16 @@ if ($servicios -notmatch 'com.salatv.app') {
     exit 0
 }
 
-Write-Host "Comprobando el vigía (Inicio -> SalaTV)..." -ForegroundColor Cyan
-# Tras actualizar, Android tarda unos segundos en volver a enganchar el vigía: se prueba varias veces.
+Write-Host "Comprobando el vigía..." -ForegroundColor Cyan
+# Lo que importa es que Android vuelva a enganchar el vigía tras actualizar. Pulsar Inicio no sirve
+# para comprobarlo: si la tele ya está en el inicio de Amazon, no hay cambio de ventana que ver.
 $foco = ""
-for ($i = 1; $i -le 4; $i++) {
+for ($i = 1; $i -le 6; $i++) {
     Start-Sleep -Seconds 4
-    & $adb -s $dest shell input keyevent KEYCODE_HOME
-    Start-Sleep -Seconds 3
+    $a11y = "$(& $adb -s $dest shell dumpsys accessibility)"
     $foco = "$((& $adb -s $dest shell dumpsys window) | Select-String 'mCurrentFocus' | Select-Object -First 1)"
-    if ($foco -match 'com.salatv.app') {
-        Write-Host "SalaTV instalada y el vigía responde." -ForegroundColor Green
+    if ($a11y -match 'Bound services:\{Service\[label=Vig' -or $foco -match 'com.salatv.app') {
+        Write-Host "SalaTV instalada y el vigía está activo." -ForegroundColor Green
         exit 0
     }
 }

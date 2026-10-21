@@ -62,7 +62,7 @@ class DockTest {
 
     @Test fun doubleHomeWindow() {
         assertTrue(Logic.isDoubleHome(900, salaShown = true))
-        assertTrue(Logic.isDoubleHome(2600, salaShown = true))
+        assertFalse(Logic.isDoubleHome(2600, salaShown = true))
         assertFalse(Logic.isDoubleHome(100, salaShown = true))
         assertFalse(Logic.isDoubleHome(900, salaShown = false))
         assertFalse(Logic.isDoubleHome(4000, salaShown = true))

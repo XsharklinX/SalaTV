@@ -1,5 +1,13 @@
 # Notas de versión
 
+## 0.3.0
+
+**ES**
+Nuevo carrusel de tendencias reales de la semana, solo de tus apps, con nota y ficha de cada título. Seguir viendo enseña capítulos, no apps: tu lista de Crunchyroll y lo que veas en esta tele, juntos y con aviso de episodios nuevos. Mi lista, anime de la temporada y buscador con dónde ver cada título. Menús en burbuja, panel estrecho, foco con halo de color y tamaño del inicio ajustable.
+
+**EN**
+New carousel with this week's real trends, only from your apps, with ratings and a page for each title. Continue watching shows episodes, not apps: your Crunchyroll list and what you watch on this TV, together, with new-episode alerts. My list, seasonal anime and a search that shows where each title streams. Bubble menus, a slim quick panel, a coloured focus halo and an adjustable home size.
+
 ## 0.2.0
 
 **ES**

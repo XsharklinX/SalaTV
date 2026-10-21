@@ -1,6 +1,14 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+// El token de TMDB vive en local.properties (fuera del repositorio): tmdb.token=eyJ...
+val local = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use(::load)
 }
 
 android {
@@ -13,8 +21,9 @@ android {
         minSdk = 28
         // 30 = Android 11, el de Fire OS 8. Subirlo cerraría la lectura de ajustes como el DNS privado.
         targetSdk = 30
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
+        resValue("string", "tmdb_token", local.getProperty("tmdb.token", ""))
     }
 
     testOptions {

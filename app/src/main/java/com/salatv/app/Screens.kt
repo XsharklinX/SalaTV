@@ -51,87 +51,6 @@ class QuickPanelActivity : Screen() {
     }
 }
 
-/** Type once, then open the search inside each app. SalaTV has no catalogue of its own. */
-class SearchActivity : Screen() {
-    private class Target(val pkg: String, val label: String, val how: String, val make: ((String) -> Intent)?)
-
-    private lateinit var results: LinearLayout
-    private lateinit var field: EditText
-
-    private fun enc(q: String) = Uri.encode(q)
-
-    /** Apps with a known search address. The rest get the standard search intent, or just open. */
-    private val known: Map<String, (String) -> Intent> = mapOf(
-        "com.netflix.ninja" to { q -> Intent(Intent.ACTION_VIEW, Uri.parse("https://www.netflix.com/search?q=${enc(q)}")) },
-        "org.smarttube.stable" to { q -> Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=${enc(q)}")) },
-        "org.smarttube.beta" to { q -> Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=${enc(q)}")) },
-        "com.amazon.firetv.youtube" to { q -> Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=${enc(q)}")) },
-        "com.stremio.one" to { q -> Intent(Intent.ACTION_VIEW, Uri.parse("stremio:///search?search=${enc(q)}")) },
-        "com.phlox.tvwebbrowser" to { q -> Intent(Intent.ACTION_VIEW, Uri.parse("https://duckduckgo.com/?q=${enc(q)}")) },
-        "com.amazon.cloud9" to { q -> Intent(Intent.ACTION_VIEW, Uri.parse("https://duckduckgo.com/?q=${enc(q)}")) },
-    )
-
-    override fun onCreate(b: Bundle?) {
-        super.onCreate(b)
-        val col = Ui.page(this, "Buscar", "Escribe una vez y elige en qué app buscarlo")
-        field = EditText(this).apply {
-            textSize = 24f; setTextColor(Ui.FG); setHintTextColor(Ui.MUTED); typeface = Fonts.regular
-            hint = "Título, serie o canal"; isSingleLine = true; imeOptions = EditorInfo.IME_ACTION_SEARCH
-            background = GradientDrawable().apply { setColor(Ui.PANEL2); cornerRadius = Ui.dp(this@SearchActivity, 30f) }
-            setPadding(Ui.px(this@SearchActivity, 26), Ui.px(this@SearchActivity, 16), Ui.px(this@SearchActivity, 26), Ui.px(this@SearchActivity, 16))
-            setOnEditorActionListener { _, _, _ -> show(text.toString()); true }
-        }
-        col.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = Ui.px(this@SearchActivity, 18) })
-        val recent = Prefs.searches(this)
-        if (recent.isNotEmpty()) {
-            Ui.section(col, "Búsquedas recientes")
-            Ui.chips(col, recent.take(4), -1) { i -> field.setText(recent[i]); show(recent[i]) }
-        }
-        results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        col.addView(results)
-        field.requestFocus()
-        field.postDelayed({ getSystemService(InputMethodManager::class.java)?.showSoftInput(field, 0) }, 250)
-    }
-
-    private fun targets(): List<Target> {
-        val apps = AppRepo.apps
-        val out = mutableListOf<Target>()
-        apps.filter { it.pkg in known }.forEach { out += Target(it.pkg, it.label, "Abre su búsqueda con el texto", known[it.pkg]) }
-        val searchable = packageManager.queryIntentActivities(Intent(Intent.ACTION_SEARCH), 0).map { it.activityInfo.packageName }.toSet()
-        apps.filter { it.pkg in searchable && it.pkg !in known }.forEach { e ->
-            out += Target(e.pkg, e.label, "Abre su búsqueda con el texto") { q -> Intent(Intent.ACTION_SEARCH).putExtra(SearchManager.QUERY, q) }
-        }
-        val dock = Prefs.current(this).pinned
-        apps.filter { it.pkg in dock && out.none { t -> t.pkg == it.pkg } }.forEach { out += Target(it.pkg, it.label, "Abre la app; escribe allí la búsqueda", null) }
-        return out
-    }
-
-    private fun show(raw: String) {
-        val q = raw.trim()
-        results.removeAllViews()
-        if (q.isEmpty()) return
-        Prefs.addSearch(this, q)
-        getSystemService(InputMethodManager::class.java)?.hideSoftInputFromWindow(field.windowToken, 0)
-        Ui.section(results, "Buscar «$q» en")
-        val ts = targets()
-        if (ts.isEmpty()) Ui.note(results, "No hay apps de vídeo que acepten búsquedas.")
-        var first: android.view.View? = null
-        ts.forEach { t ->
-            val e = AppRepo.byPkg(t.pkg)
-            val r = Ui.row(results, t.label, t.how, icon = e?.banner ?: e?.icon) { go(t, q) }
-            if (first == null) first = r.view
-        }
-        first?.requestFocus()
-    }
-
-    private fun go(t: Target, q: String) {
-        val i = t.make?.invoke(q)?.setPackage(t.pkg)?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        if (i != null && Sys.start(this, t.pkg, i)) return
-        if (Sys.start(this, t.pkg, null)) Ui.toast(this, "Busca «$q» dentro de ${t.label}")
-        else Ui.toast(this, "No se pudo abrir ${t.label}")
-    }
-}
-
 /** HDMI ports and the tuner, with the names the user gives them. */
 class InputsActivity : Screen() {
     override fun onResume() {
@@ -410,8 +329,44 @@ class SettingsActivity : Screen() {
         Ui.row(col, "Ordenar «Todas tus apps»", null, Logic.sortName(p.sort)) {
             Ui.menu(this, "Ordenar", Logic.SORTS.map { (k, name) -> name to { p.sort = k; Prefs.saveProfile(this, p); onResume() } })
         }
-        toggle(col, "Fila «Continuar viendo»", "Lo último que viste y las apps que abriste hace poco", "contRow", true)
-        if (!MediaWatcher.enabled(this)) Ui.note(col, "Para ver capítulos y películas en «Continuar viendo» hace falta un permiso. Dalo en «Limpieza y vigía» › «Configurar todo».", Ui.WARN)
+        toggle(col, "Fila «Seguir viendo»", "Capítulos y pelis a medias de Crunchyroll y de lo que veas en esta tele", "contRow", true)
+        if (!MediaWatcher.enabled(this)) Ui.note(col, "Para guardar lo que ves en esta tele hace falta un permiso. Dalo en «Limpieza y vigía» › «Configurar todo».", Ui.WARN)
+
+        val dens = listOf("Compacto", "Normal", "Grande")
+        Ui.row(col, "Tamaño del inicio", "Tarjetas, textos y separaciones", dens[Prefs.int(this, "density", 1)]) {
+            Ui.menu(this, "Tamaño del inicio", dens.mapIndexed { i, n -> n to { Prefs.put(this, "density", i); onResume() } })
+        }
+        toggle(col, "Carrusel de tendencias", "Lo más visto esta semana en tus apps, arriba del todo", "carousel", true)
+        toggle(col, "Fondo que se mueve", "La imagen de la tendencia se acerca muy despacio", "kenBurns", true)
+        toggle(col, "Anime de la temporada", "Fila con los estrenos de Crunchyroll", "seasonRow", true)
+
+        Ui.section(col, "Servicios")
+        val region = Tmdb.region(this)
+        Ui.row(col, "País de las tendencias", "Para saber en qué app está cada título", Tmdb.REGIONS.firstOrNull { it.first == region }?.second ?: region) {
+            Ui.menu(this, "País", Tmdb.REGIONS.map { (code, name) -> name to { Prefs.put(this, "region", code); Prefs.put(this, "trendRegion", ""); onResume() } })
+        }
+        if (Crunchy.linked(this)) {
+            val crName = Prefs.str(this, "crProfileName:" + p.id) ?: "el principal"
+            Ui.row(col, "Crunchyroll", "Conectado como ${Prefs.str(this, "crEmail") ?: "tu cuenta"} · perfil de ${p.name}: $crName", "Cambiar") {
+                Ui.menu(this, "Crunchyroll", listOf(
+                    "Perfil de Crunchyroll para ${p.name}" to { pickCrProfile(p) },
+                    "Desconectar" to { Crunchy.logout(this); onResume() },
+                ))
+            }
+        } else {
+            Ui.row(col, "Conectar Crunchyroll", "Para Seguir viendo, episodios nuevos y la temporada. No oficial: puede dejar de funcionar.") {
+                Ui.prompt(this, "Correo de Crunchyroll", Prefs.str(this, "crEmail") ?: "") { email ->
+                    Ui.prompt(this, "Contraseña", "", password = true) { pass ->
+                        Ui.toast(this, "Conectando con Crunchyroll…")
+                        Bg.run({ Crunchy.login(this, email, pass) }) { r ->
+                            r.onSuccess { Ui.toast(this, it); Prefs.put(this, "feedAt", 0L); onResume() }
+                                .onFailure { Ui.toast(this, "Crunchyroll no aceptó el inicio de sesión"); Registro.add(this, "Crunchyroll", "Inicio de sesión: ${it.message}") }
+                        }
+                    }
+                }
+            }
+            Ui.note(col, "También desde el PC, sin escribir con el mando: tools\\claves.ps1")
+        }
 
         Ui.section(col, "Al encender")
         val wake = Prefs.str(this, "wake", "home")!!
@@ -420,11 +375,13 @@ class SettingsActivity : Screen() {
             wake == "last" -> "La última app"
             wake.startsWith("app:") -> AppRepo.byPkg(wake.removePrefix("app:"))?.label ?: "Una app"
             wake.startsWith("input:") -> Prefs.inputNames(this)[wake.removePrefix("input:")] ?: "Una entrada"
+            wake == "resume" -> "Seguir donde lo dejé"
             else -> "El inicio de SalaTV"
         }
         Ui.row(col, "Al encender la tele", "Qué se abre nada más encender", wakeName) {
             Ui.menu(this, "Al encender la tele", listOf(
                 "El inicio de SalaTV" to { Prefs.put(this, "wake", "home"); onResume() },
+                "Seguir donde lo dejé" to { Prefs.put(this, "wake", "resume"); onResume() },
                 "Lo que más uso a esa hora" to { Prefs.put(this, "wake", "usual"); onResume() },
                 "La última app" to { Prefs.put(this, "wake", "last"); onResume() },
                 "Una app concreta…" to { startActivity(Intent(this, AppPickerActivity::class.java).putExtra("purpose", "wake")) },
@@ -478,6 +435,17 @@ class SettingsActivity : Screen() {
         Ui.section(col, "Acerca de")
         val v = packageManager.getPackageInfo(packageName, 0).versionName
         Ui.note(col, "SalaTV $v. Sin anuncios y sin cuentas. Solo usa internet para las apps recomendadas y sus versiones; nada de lo que ves sale de la tele.")
+    }
+
+    private fun pickCrProfile(p: Profile) {
+        Ui.toast(this, "Leyendo los perfiles de Crunchyroll…")
+        Bg.run({ Crunchy.profiles(this) }) { r ->
+            val list = r.getOrNull()
+            if (list.isNullOrEmpty()) { Ui.toast(this, "No se pudieron leer los perfiles"); return@run }
+            Ui.menu(this, "Perfil para ${p.name}", list.map { (id, name) -> name to {
+                Prefs.put(this, "crProfile:" + p.id, id); Prefs.put(this, "crProfileName:" + p.id, name); onResume()
+            } })
+        }
     }
 
     private fun toggle(col: android.widget.LinearLayout, title: String, sub: String, key: String, def: Boolean, after: () -> Unit = {}) {

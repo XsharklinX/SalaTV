@@ -66,6 +66,8 @@
         <activity android:name=".SettingsActivity" android:exported="false" />
         <activity android:name=".CityActivity" android:exported="false" />
         <activity android:name=".StoreActivity" android:exported="false" />
+        <activity android:name=".TitleActivity" android:exported="false" />
+        <activity android:name=".ResumePromptActivity" android:exported="false" android:excludeFromRecents="true" />
         <activity android:name=".RegistroActivity" android:exported="false" />
         <activity android:name=".ListsActivity" android:exported="false" />
         <!-- Own task, so finishing returns to the app it was guarding. -->

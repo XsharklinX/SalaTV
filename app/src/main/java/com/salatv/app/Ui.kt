@@ -93,6 +93,16 @@ object Ui {
         if (strokeW > 0) setStroke(strokeW, stroke)
     }
 
+    /**
+     * «Halo del color de la app»: the focused item gets a soft tint of [accent] that fades to the right
+     * and a thin border of it. The text keeps its colour, so nothing turns white on white.
+     */
+    fun halo(c: Context, accent: Int, radius: Float) = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+        intArrayOf(alpha(accent, 0.38f), alpha(accent, 0.10f))).apply {
+        cornerRadius = radius
+        setStroke(px(c, 2), alpha(accent, 0.85f))
+    }
+
     private fun states(focused: Drawable, selected: Drawable?, normal: Drawable) = StateListDrawable().apply {
         addState(intArrayOf(android.R.attr.state_focused), focused)
         if (selected != null) addState(intArrayOf(android.R.attr.state_selected), selected)
@@ -118,94 +128,92 @@ object Ui {
         val scroll = ScrollView(a).apply { isVerticalScrollBarEnabled = false; isFillViewport = true }
         val col = LinearLayout(a).apply { orientation = LinearLayout.VERTICAL }
         if (side) {
-            val r = dp(a, 26f)
-            root.setBackgroundColor(0xA6000000.toInt())
-            scroll.background = GradientDrawable().apply { setColor(PANEL); cornerRadii = floatArrayOf(r, r, 0f, 0f, 0f, 0f, r, r) }
-            col.setPadding(px(a, 28), px(a, 30), px(a, 28), px(a, 30))
+            // «Columna estrecha»: a 300 dp panel floating on the right, the home still visible beside it.
+            val r = dp(a, 22f)
+            root.setBackgroundColor(0x66000000)
+            scroll.background = GradientDrawable().apply { setColor(0xF2121520.toInt()); cornerRadius = r; setStroke(px(a, 1), 0x1FFFFFFF) }
+            col.setPadding(px(a, 14), px(a, 18), px(a, 14), px(a, 18))
             scroll.addView(col, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-            root.addView(scroll, FrameLayout.LayoutParams(px(a, 440), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END))
+            root.addView(scroll, FrameLayout.LayoutParams(px(a, 300), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END).apply {
+                setMargins(0, px(a, 18), px(a, 18), px(a, 18))
+            })
             root.setOnClickListener { a.finish() }
         } else {
             root.background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(0xFF171C29.toInt(), BG, BG))
-            col.setPadding(px(a, 64), px(a, 40), px(a, 64), px(a, 56))
-            scroll.addView(col, FrameLayout.LayoutParams(px(a, 780), ViewGroup.LayoutParams.WRAP_CONTENT))
+            col.setPadding(px(a, 56), px(a, 32), px(a, 56), px(a, 48))
+            scroll.addView(col, FrameLayout.LayoutParams(px(a, 680), ViewGroup.LayoutParams.WRAP_CONTENT))
             root.addView(scroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         }
-        col.addView(text(a, title, if (side) 26f else 34f, FG, Fonts.bold))
-        if (sub != null) col.addView(text(a, sub, 15f, MUTED, Fonts.light), lp(a, 8))
+        col.addView(text(a, title, if (side) 19f else 28f, FG, Fonts.bold).apply { if (side) setPadding(px(a, 8), 0, 0, 0) })
+        if (sub != null) col.addView(text(a, sub, 13.5f, MUTED, Fonts.light), lp(a, 6))
         a.setContentView(root)
         return col
     }
 
     class Row(val view: LinearLayout, val title: TextView, val sub: TextView?, val value: TextView) {
-        fun valueColor(color: Int) = value.setTextColor(textStates(INK, color, color))
+        fun valueColor(color: Int) = value.setTextColor(color)
     }
 
-    fun row(col: LinearLayout, title: String, sub: String? = null, value: String? = null, icon: Bitmap? = null, onClick: (() -> Unit)? = null): Row {
+    /** Thin list row (44 dp with one line): halo on focus, value on the right. */
+    fun row(col: LinearLayout, title: String, sub: String? = null, value: String? = null, icon: Bitmap? = null, accent: Int = LAMP, onClick: (() -> Unit)? = null): Row {
         val c = col.context
         val r = LinearLayout(c).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(px(c, 18), px(c, 13), px(c, 18), px(c, 13))
-            background = states(round(Color.WHITE, dp(c, 14f)), null, round(PANEL2, dp(c, 14f)))
+            minimumHeight = px(c, 44)
+            setPadding(px(c, 14), px(c, 8), px(c, 14), px(c, 8))
+            background = states(halo(c, accent, dp(c, 12f)), null, round(Color.TRANSPARENT, dp(c, 12f)))
         }
         if (icon != null) {
             val wide = icon.width > icon.height * 1.3f
             val iv = ImageView(c).apply {
                 setImageBitmap(icon); scaleType = ImageView.ScaleType.CENTER_CROP
-                clipToOutline = true; background = round(Color.TRANSPARENT, dp(c, 6f))
+                clipToOutline = true; background = round(Color.TRANSPARENT, dp(c, 5f))
             }
-            r.addView(iv, LinearLayout.LayoutParams(px(c, if (wide) 64 else 36), px(c, 36)).apply { rightMargin = px(c, 14) })
+            r.addView(iv, LinearLayout.LayoutParams(px(c, if (wide) 50 else 28), px(c, 28)).apply { rightMargin = px(c, 12) })
         }
         val texts = LinearLayout(c).apply { orientation = LinearLayout.VERTICAL }
-        val t = text(c, title, 17f, FG, Fonts.medium).apply {
-            setTextColor(textStates(INK, FG, FG)); isDuplicateParentStateEnabled = true
-        }
+        val t = text(c, title, 15.5f, FG, Fonts.medium)
         texts.addView(t)
         var s: TextView? = null
         if (sub != null) {
-            s = text(c, sub, 13.5f, MUTED, Fonts.light).apply {
-                setTextColor(textStates(0xFF4A4F5C.toInt(), MUTED, MUTED)); isDuplicateParentStateEnabled = true
-            }
-            texts.addView(s, lp(c, 4))
+            s = text(c, sub, 12.5f, MUTED, Fonts.light)
+            texts.addView(s, lp(c, 2))
         }
         r.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        val v = text(c, value ?: "", 15f, MUTED, Fonts.medium).apply {
-            setTextColor(textStates(INK, MUTED, MUTED)); isDuplicateParentStateEnabled = true; gravity = Gravity.END
-        }
-        r.addView(v, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = px(c, 16) })
+        val v = text(c, value ?: "", 13.5f, MUTED, Fonts.regular).apply { gravity = Gravity.END }
+        r.addView(v, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = px(c, 14) })
         if (onClick != null) {
             r.isFocusable = true; r.isClickable = true
             r.setOnClickListener { onClick() }
-            r.setOnFocusChangeListener { view, f ->
-                view.animate().scaleX(if (f) 1.02f else 1f).scaleY(if (f) 1.02f else 1f).setDuration(140).start()
-            }
+        } else {
+            t.setTextColor(MUTED)
         }
-        col.addView(r, lp(c, 8))
+        col.addView(r, lp(c, 2))
         return Row(r, t, s, v)
     }
 
     fun section(col: LinearLayout, s: String) {
         val c = col.context
-        col.addView(text(c, s.uppercase(), 12.5f, MUTED, Fonts.medium).apply { letterSpacing = 0.14f }, lp(c, 28))
+        col.addView(text(c, s.uppercase(), 11f, MUTED, Fonts.medium).apply { letterSpacing = 0.14f; setPadding(px(c, 14), 0, 0, 0) }, lp(c, 18))
     }
 
     fun note(col: LinearLayout, s: String, color: Int = MUTED): TextView {
-        val t = text(col.context, s, 14.5f, color, Fonts.light)
-        col.addView(t, lp(col.context, 10))
+        val t = text(col.context, s, 13f, color, Fonts.light).apply { setPadding(px(col.context, 14), 0, px(col.context, 8), 0) }
+        col.addView(t, lp(col.context, 6))
         return t
     }
 
     fun chips(col: LinearLayout, labels: List<String>, selected: Int, onPick: (Int) -> Unit): LinearLayout {
         val c = col.context
-        val wrap = LinearLayout(c).apply { orientation = LinearLayout.HORIZONTAL }
+        val wrap = LinearLayout(c).apply { orientation = LinearLayout.HORIZONTAL; setPadding(px(c, 10), 0, 0, 0) }
         val views = mutableListOf<TextView>()
         labels.forEachIndexed { i, l ->
-            val t = text(c, l, 15f, FG, Fonts.medium).apply {
+            val t = text(c, l, 13f, FG, Fonts.medium).apply {
                 isFocusable = true; isClickable = true
-                setPadding(px(c, 16), px(c, 10), px(c, 16), px(c, 10))
-                background = states(round(Color.WHITE, dp(c, 22f)), round(alpha(LAMP, 0.2f), dp(c, 22f), LAMP, px(c, 2)), round(PANEL2, dp(c, 22f)))
-                setTextColor(textStates(INK, LAMP, FG))
+                setPadding(px(c, 12), px(c, 7), px(c, 12), px(c, 7))
+                background = states(halo(c, LAMP, dp(c, 16f)), round(alpha(LAMP, 0.12f), dp(c, 16f), LAMP, px(c, 1)), round(0x12FFFFFF, dp(c, 16f)))
+                setTextColor(textStates(FG, LAMP, FG))
                 isSelected = i == selected
                 setOnClickListener {
                     views.forEachIndexed { j, v -> v.isSelected = j == i }
@@ -213,9 +221,9 @@ object Ui {
                 }
             }
             views += t
-            wrap.addView(t, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = px(c, 10) })
+            wrap.addView(t, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = px(c, 6) })
         }
-        col.addView(wrap, lp(c, 10))
+        col.addView(wrap, lp(c, 6))
         return wrap
     }
 
@@ -241,34 +249,63 @@ object Ui {
 
     fun toast(c: Context, s: String) = Toast.makeText(c.applicationContext, s, Toast.LENGTH_LONG).show()
 
-    private fun dialog(a: Activity, title: String, body: (LinearLayout, Dialog) -> Unit) {
+    /**
+     * A small floating card: next to [anchor] (screen pixels) when given, else centred.
+     * «Burbuja junto a la app»: about 250 dp wide, only as tall as its options.
+     */
+    private fun dialog(a: Activity, title: String, anchor: android.graphics.Rect? = null, width: Int = 260, body: (LinearLayout, Dialog) -> Unit) {
         val d = Dialog(a)
         d.requestWindowFeature(Window.FEATURE_NO_TITLE)
         val col = LinearLayout(a).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(px(a, 22), px(a, 20), px(a, 22), px(a, 22))
-            background = round(PANEL, dp(a, 22f), 0x26FFFFFF, px(a, 1))
+            setPadding(px(a, 8), px(a, 10), px(a, 8), px(a, 8))
+            background = round(0xF2121520.toInt(), dp(a, 16f), 0x1FFFFFFF, px(a, 1))
+            elevation = dp(a, 12f)
         }
-        col.addView(text(a, title, 21f, FG, Fonts.bold))
+        col.addView(text(a, title.uppercase(), 11f, MUTED, Fonts.medium).apply {
+            letterSpacing = 0.12f; setPadding(px(a, 12), px(a, 2), px(a, 12), px(a, 6)); maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        })
         body(col, d)
-        d.setContentView(col, ViewGroup.LayoutParams(px(a, 400), ViewGroup.LayoutParams.WRAP_CONTENT))
-        d.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        d.window?.setDimAmount(0.6f)
+        d.setContentView(col, ViewGroup.LayoutParams(px(a, width), ViewGroup.LayoutParams.WRAP_CONTENT))
+        d.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.35f)
+            if (anchor != null) {
+                col.measure(View.MeasureSpec.makeMeasureSpec(px(a, width), View.MeasureSpec.EXACTLY), View.MeasureSpec.UNSPECIFIED)
+                val h = col.measuredHeight
+                val screenH = a.resources.displayMetrics.heightPixels
+                val screenW = a.resources.displayMetrics.widthPixels
+                val lpw = attributes
+                lpw.gravity = Gravity.TOP or Gravity.START
+                lpw.x = anchor.left.coerceIn(px(a, 16), screenW - px(a, width) - px(a, 16))
+                lpw.y = (if (anchor.top - h - px(a, 12) > px(a, 16)) anchor.top - h - px(a, 12) else anchor.bottom + px(a, 12)).coerceIn(px(a, 16), screenH - h - px(a, 16))
+                attributes = lpw
+            }
+        }
         d.show()
     }
 
-    fun menu(a: Activity, title: String, items: List<Pair<String, () -> Unit>>) = dialog(a, title) { col, d ->
-        items.forEach { (label, fn) -> row(col, label) { d.dismiss(); fn() } }
+    fun menu(a: Activity, title: String, items: List<Pair<String, () -> Unit>>, anchor: android.graphics.Rect? = null, accent: Int = LAMP) =
+        dialog(a, title, anchor) { col, d ->
+            items.forEach { (label, fn) -> row(col, label, accent = accent) { d.dismiss(); fn() } }
+        }
+
+    /** Four options at hand and the rest behind «Más…», in the same spot. */
+    fun bubble(a: Activity, title: String, main: List<Pair<String, () -> Unit>>, more: List<Pair<String, () -> Unit>>, anchor: android.graphics.Rect?, accent: Int) {
+        val first = if (more.isEmpty()) main else main + ("Más…" to { menu(a, title, more, anchor, accent) })
+        menu(a, title, first, anchor, accent)
     }
 
     fun confirm(a: Activity, title: String, yes: String, fn: () -> Unit) = menu(a, title, listOf(yes to fn, "Cancelar" to {}))
 
-    fun prompt(a: Activity, title: String, initial: String, onOk: (String) -> Unit) = dialog(a, title) { col, d ->
+    fun prompt(a: Activity, title: String, initial: String, password: Boolean = false, onOk: (String) -> Unit) = dialog(a, title, width = 400) { col, d ->
         val field = EditText(a).apply {
             setText(initial); setSelection(initial.length)
-            setTextColor(FG); setHintTextColor(MUTED); textSize = 18f; typeface = Fonts.regular
+            setTextColor(FG); setHintTextColor(MUTED); textSize = 17f; typeface = Fonts.regular
             isSingleLine = true; imeOptions = EditorInfo.IME_ACTION_DONE
-            background = round(PANEL2, dp(a, 12f)); setPadding(px(a, 16), px(a, 12), px(a, 16), px(a, 12))
+            if (password) inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            background = round(PANEL2, dp(a, 12f)); setPadding(px(a, 14), px(a, 10), px(a, 14), px(a, 10))
         }
         fun done() {
             val v = field.text.toString().trim()
