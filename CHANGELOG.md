@@ -1,5 +1,13 @@
 # Notas de versión
 
+## 0.4.0
+
+**ES**
+«Ver» entra directo en la serie o la peli, y en Crunchyroll en el capítulo exacto. Mi lista es tu lista de Crunchyroll de verdad. Nueva pantalla Explorar con Películas, Series y Anime, «Porque viste…» y fichas completas con temporadas, reparto y parecidas. Logos de los títulos, foco con efecto muelle, carga con brillo y transición a la ficha. Ajustes nuevos con rueda arriba: dos columnas, vista previa, interruptores, deslizadores, buscador y Comprobar todo.
+
+**EN**
+“Watch” opens the show or film itself, and the exact episode on Crunchyroll. My list is your real Crunchyroll list. New Explore screen with Movies, Shows and Anime, “Because you watched…” and full title pages with seasons, cast and similar titles. Title logos, springy focus, shimmer while loading and a zoom into each page. New settings behind a gear: two columns, live preview, switches, sliders, search and Check everything.
+
 ## 0.3.0
 
 **ES**

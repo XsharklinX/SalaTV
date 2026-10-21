@@ -114,8 +114,8 @@ object Crunchy {
             progress = if (durSec > 0) (playheadSec.toFloat() / durSec).coerceIn(0f, 1f) else 0f,
             minutesLeft = if (durSec > 0) ((durSec - playheadSec) / 60).toInt() else -1,
             at = if (isNew) maxOf(at, avail) else at, isNew = isNew,
-            url = "$BASE/watch/$epId", playheadSec = playheadSec,
-            seriesUrl = seriesId?.let { "$BASE/series/$it" },
+            url = "crunchyroll://watch/$epId", playheadSec = playheadSec,
+            seriesUrl = seriesId?.let { "crunchyroll://series/$it" },
         )
     }
 
@@ -166,9 +166,35 @@ object Crunchy {
             val id = o.getString("id")
             Show(key = "crs:$id", pkg = PKG, title = o.optString("title"), sub = o.optString("description").take(140),
                 image = image(o.optJSONObject("images"), "poster_wide"), progress = 0f, minutesLeft = -1, at = 0L,
-                isNew = false, url = "$BASE/series/$id", playheadSec = 0, seriesUrl = "$BASE/series/$id")
+                isNew = false, url = "crunchyroll://series/$id", playheadSec = 0, seriesUrl = "crunchyroll://series/$id")
         }
         return name to out
+    }
+
+    private fun account(c: Context): String = Prefs.str(c, "crAccount") ?: run { bearer(c); Prefs.str(c, "crAccount") } ?: throw NotLinked()
+
+    private fun headers(c: Context) = mapOf("Authorization" to "Bearer ${bearer(c)}", "User-Agent" to UA)
+
+    /** Your Crunchyroll list («Mi lista»), newest first. */
+    fun watchlist(c: Context): List<Show> {
+        val a = api(c, "/content/v2/discover/${account(c)}/watchlist?order=desc&n=40").optJSONArray("data") ?: return emptyList()
+        return (0 until a.length()).map { a.getJSONObject(it) }.mapNotNull { o ->
+            val p = o.optJSONObject("panel") ?: return@mapNotNull null
+            val id = p.optString("id").ifEmpty { return@mapNotNull null }
+            val isNew = o.optBoolean("new")
+            Show(key = "crw:$id", pkg = PKG, title = p.optString("title"),
+                sub = when { isNew -> "Episodio nuevo"; o.optBoolean("fully_watched") -> "Vista"; o.optBoolean("never_watched") -> "Sin empezar"; else -> "A medias" },
+                image = image(p.optJSONObject("images"), "poster_wide"), progress = 0f, minutesLeft = -1, at = 0L, isNew = isNew,
+                url = "crunchyroll://series/$id", playheadSec = 0, seriesUrl = "crunchyroll://series/$id")
+        }
+    }
+
+    fun addToWatchlist(c: Context, seriesId: String) {
+        Http.post("$BASE/content/v2/${account(c)}/watchlist?locale=$LOCALE", JSONObject().put("content_id", seriesId).toString(), "application/json", headers(c))
+    }
+
+    fun removeFromWatchlist(c: Context, seriesId: String) {
+        Http.delete("$BASE/content/v2/${account(c)}/watchlist/$seriesId?locale=$LOCALE", headers(c))
     }
 
     /** The Crunchyroll series id for a title, to open it straight from the carousel. */

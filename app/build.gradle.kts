@@ -21,8 +21,8 @@ android {
         minSdk = 28
         // 30 = Android 11, el de Fire OS 8. Subirlo cerraría la lectura de ajustes como el DNS privado.
         targetSdk = 30
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.4.0"
         resValue("string", "tmdb_token", local.getProperty("tmdb.token", ""))
     }
 

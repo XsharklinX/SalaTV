@@ -33,6 +33,7 @@ class MainActivity : Activity(), HomeView.Host {
         Fonts.init(this)
         home = HomeView(this)
         home.host = this
+        home.canList = { MyList.canAdd(this, it) }
         // «Arranque al instante»: the last picture of the home is up before the apps finish loading.
         if (AppRepo.apps.isEmpty()) home.placeholder = try { BitmapFactory.decodeFile(snapFile().path) } catch (e: Exception) { null }
         setContentView(home)
@@ -98,8 +99,10 @@ class MainActivity : Activity(), HomeView.Host {
             val feed = try { Feed.refresh(app) } catch (e: Exception) { errors += "Seguir viendo: ${e.message}"; emptyList() }
             try { Feed.refreshSeason(app) } catch (e: Exception) { errors += "Temporada: ${e.message}" }
             try { MyList.refresh(app) } catch (e: Exception) { errors += "Mi lista: ${e.message}" }
+            try { Because.refresh(app, feed) } catch (e: Exception) { errors += "Porque viste: ${e.message}" }
             try { Updates.checkIfDue(app) } catch (_: Exception) {}
             errors.forEach { Registro.add(app, "Internet", it) }
+            Prefs.put(app, "netAt", System.currentTimeMillis())
             Feed.fresh(app, feed)
         }) { r ->
             r.getOrNull()?.firstOrNull()?.let { s -> home.notice("Nuevo: ${s.title} · ${s.sub.removePrefix("Siguiente: ")} ya está en ${Services.name(s.pkg)}") }
@@ -134,7 +137,9 @@ class MainActivity : Activity(), HomeView.Host {
             rows += HomeView.CardRow("seguir", "Seguir viendo", shows.map { HomeView.Item.Card(it, "seguir") })
         }
         val mine = MyList.all(this)
-        rows += HomeView.CardRow("milista", "Mi lista", mine.map { HomeView.Item.Pick(it) })
+        if (mine.isNotEmpty() && Prefs.bool(this, "listRow", true)) rows += HomeView.CardRow("milista", "Mi lista · Crunchyroll", mine.map { HomeView.Item.Card(it, "milista") })
+        val (seed, because) = Because.cached(this)
+        if (because.isNotEmpty() && Prefs.bool(this, "becauseRow", true)) rows += HomeView.CardRow("because", "Porque viste $seed", because.filter { t -> t.pkgs.any { it in byPkg } }.map { HomeView.Item.Pick(it) })
         val (seasonName, season) = Feed.cachedSeason(this)
         if (Prefs.bool(this, "seasonRow", true) && byPkg.containsKey(Crunchy.PKG)) {
             rows += HomeView.CardRow("season", seasonName.ifEmpty { "Anime de la temporada" }, season.map { HomeView.Item.Card(it, "season") })
@@ -162,18 +167,23 @@ class MainActivity : Activity(), HomeView.Host {
         val upd = Updates.count(this)
         if (upd > 0) chips += HomeView.Chip("updates", if (upd == 1) "1 actualización" else "$upd actualizaciones", 0,
             "Actualizaciones", "Hay versiones nuevas de apps que instalaste por fuera", warn = true)
+        chips += HomeView.Chip("explorar", "Explorar", HomeView.COMPASS, "Explorar", "Películas, series y anime de tus apps")
         chips += HomeView.Chip("buscar", "Buscar", HomeView.SEARCH, "Buscar", "Un título y en qué app está")
         chips += HomeView.Chip("entradas", "Entradas", HomeView.INPUT, "Entradas", "Consola, decodificador y TV")
         val net = Net.describe(this)
         chips += HomeView.Chip("red", "", if (net.online) HomeView.WIFI else HomeView.NOWIFI, "Red", net.text)
-        chips += HomeView.Chip("panel", "", HomeView.GEAR, "Panel rápido", "Apagado programado, tema, salud de la tele y más")
+        chips += HomeView.Chip("panel", "", HomeView.GEAR, "Ajustes", "OK para los ajustes de SalaTV · ☰ para el panel rápido")
         val profiles = Prefs.profiles(this)
         chips += HomeView.Chip("perfil", p.name.take(1).uppercase(), HomeView.AVATAR, p.name,
             if (profiles.size > 1) "OK para cambiar de perfil" else "Perfiles de la casa", color = p.color)
 
-        val trends = if (Prefs.bool(this, "carousel", true)) Tmdb.cachedTrending(this).filter { t -> t.pkgs.any { it in byPkg } } else emptyList()
+        // «Carrusel con más cosas»: your new episodes first, then this week's trends in the services you chose.
+        val services = Prefs.set(this, "carouselSvc")
+        val trends = if (!Prefs.bool(this, "carousel", true)) emptyList() else
+            feed.filter { it.isNew && it.pkg in byPkg }.take(3).map { s -> Title("show", s.key.hashCode(), s.title, s.sub, s.image, null, 0.0, "", listOf(s.pkg)) } +
+                Tmdb.cachedTrending(this).filter { t -> t.pkgs.any { it in byPkg && (services.isEmpty() || it in services) } }
         home.setData(chips, trends, dockItems, rows, grid, if (profiles.size > 1) p.name else null,
-            "Todas tus apps · " + Logic.sortName(p.sort), mine.map { it.key }.toSet())
+            "Todas tus apps · " + Logic.sortName(p.sort), mine.map { it.title.lowercase() }.toSet())
         saveSnapshotLater()
     }
 
@@ -194,10 +204,7 @@ class MainActivity : Activity(), HomeView.Host {
         when (item) {
             is HomeView.Item.App -> launch(item.e)
             is HomeView.Item.Card -> Feed.open(this, item.s)
-            is HomeView.Item.Pick -> {
-                val pkg = item.t.pkgs.firstOrNull()
-                if (pkg != null) AppSearch.openTitle(this, pkg, item.t) else openTitlePage(item.t)
-            }
+            is HomeView.Item.Pick -> openTitlePage(item.t)
             is HomeView.Item.Fold -> startActivity(Intent(this, FolderActivity::class.java).putExtra("id", item.f.id))
             is HomeView.Item.Hidden -> startActivity(Intent(this, HiddenActivity::class.java))
         }
@@ -206,18 +213,41 @@ class MainActivity : Activity(), HomeView.Host {
     override fun onMove() = Sounds.tick(this)
 
     override fun onTrend(t: Title, action: Int) {
-        when (action) {
-            0 -> {
+        if (t.type == "show") {
+            val s = Feed.cached(this).firstOrNull { it.title == t.name } ?: return
+            if (action == 0) Feed.open(this, s)
+            else Feed.open(this, Show(s.key, s.pkg, s.title, "", null, 0f, -1, 0, false, s.seriesUrl, 0))
+            return
+        }
+        when {
+            action == 0 -> {
                 Sounds.open(this)
                 val pkg = t.pkgs.firstOrNull()
-                if (pkg != null) AppSearch.openTitle(this, pkg, t) else openTitlePage(t)
+                if (pkg != null) Deep.title(this, pkg, t) else openTitlePage(t)
             }
-            1 -> { val added = MyList.toggle(this, t); Ui.toast(this, if (added) "«${t.name}» está en Mi lista" else "Quitada de Mi lista"); reload() }
+            action == 1 && MyList.canAdd(this, t) -> toggleList(t)
             else -> openTitlePage(t)
         }
     }
 
-    private fun openTitlePage(t: Title) = startActivity(Intent(this, TitleActivity::class.java).putExtra("type", t.type).putExtra("id", t.id).putExtra("json", t.toJson().toString()))
+    private fun toggleList(t: Title) {
+        Ui.toast(this, "Actualizando tu lista de Crunchyroll…")
+        Bg.run({ MyList.toggle(this, t) }) { r ->
+            r.onSuccess { Ui.toast(this, if (it) "«${t.name}» está en tu lista de Crunchyroll" else "Quitada de tu lista de Crunchyroll"); reload() }
+                .onFailure { Ui.toast(this, "Crunchyroll no dejó cambiar la lista: ${it.message}") }
+        }
+    }
+
+    /** The title page fades in over the zoomed picture, so it looks like one movement. */
+    private fun openTitlePage(t: Title) {
+        startActivity(Intent(this, TitleActivity::class.java).putExtra("json", t.toJson().toString()))
+        @Suppress("DEPRECATION")
+        overridePendingTransition(android.R.anim.fade_in, 0)
+    }
+
+    override fun onChipMenu(chip: HomeView.Chip) {
+        if (chip.id == "panel") startActivity(Intent(this, QuickPanelActivity::class.java))
+    }
 
     private fun launch(e: AppEntry) {
         if (!Sys.start(this, e.pkg, e.intent)) {
@@ -229,9 +259,10 @@ class MainActivity : Activity(), HomeView.Host {
     override fun onChip(chip: HomeView.Chip) {
         when (chip.id) {
             "buscar" -> startActivity(Intent(this, SearchActivity::class.java))
+            "explorar" -> startActivity(Intent(this, ExploreActivity::class.java))
             "entradas" -> startActivity(Intent(this, InputsActivity::class.java))
             "red" -> Sys.open(this, android.provider.Settings.ACTION_WIFI_SETTINGS)
-            "panel" -> startActivity(Intent(this, QuickPanelActivity::class.java))
+            "panel" -> startActivity(Intent(this, SettingsActivity::class.java))
             "perfil" -> startActivity(Intent(this, ProfilesActivity::class.java).putExtra("pick", Prefs.profiles(this).size > 1))
             "updates" -> startActivity(Intent(this, StoreActivity::class.java))
             else -> startActivity(Intent(this, CleanupActivity::class.java))
@@ -246,16 +277,19 @@ class MainActivity : Activity(), HomeView.Host {
                 val acc = Services.badge(s.pkg).second
                 val main = mutableListOf<Pair<String, () -> Unit>>()
                 main += (if (item.row == "season") "Ver la serie" else "Seguir viendo") to { Feed.open(this, s) }
-                if (s.seriesUrl != null && item.row != "season") main += "Ver la serie" to { Feed.open(this, Show(s.key, s.pkg, s.title, "", null, 0f, -1, 0, false, s.seriesUrl, 0)) }
-                if (item.row != "season") main += "Quitar de Seguir viendo" to { Feed.hide(this, s); reload() }
+                if (s.seriesUrl != null && item.row == "seguir") main += "Ver la serie" to { Feed.open(this, Show(s.key, s.pkg, s.title, "", null, 0f, -1, 0, false, s.seriesUrl, 0)) }
+                if (item.row == "seguir") main += "Quitar de Seguir viendo" to { Feed.hide(this, s); reload() }
+                if (item.row == "milista") main += "Quitar de mi lista de Crunchyroll" to {
+                    Bg.run({ MyList.remove(this, s) }) { r -> r.onFailure { Ui.toast(this, "No se pudo quitar: ${it.message}") }; reload() }
+                }
                 Ui.bubble(this, s.title, main, emptyList(), anchor, acc)
             }
             is HomeView.Item.Pick -> {
                 val t = item.t
                 val acc = t.pkgs.firstOrNull()?.let { Services.badge(it).second } ?: Ui.LAMP
-                val main = t.pkgs.map { pkg -> "Ver en ${Services.name(pkg)}" to { AppSearch.openTitle(this, pkg, t) } }.toMutableList()
+                val main = t.pkgs.map { pkg -> "Ver en ${Services.name(pkg)}" to { Deep.title(this, pkg, t) } }.toMutableList()
                 main += "Ficha" to { openTitlePage(t) }
-                main += "Quitar de Mi lista" to { MyList.toggle(this, t); reload() }
+                if (MyList.canAdd(this, t)) main += (if (MyList.has(this, t)) "Quitar de mi lista" else "Añadir a mi lista de Crunchyroll") to { toggleList(t) }
                 Ui.bubble(this, t.name, main, emptyList(), anchor, acc)
             }
             is HomeView.Item.Fold -> Ui.bubble(this, item.f.name, listOf(

@@ -135,31 +135,63 @@ object Feed {
     }
 }
 
-/** «Mi lista»: series and films to watch, per profile, from the carousel, the title page or the search. */
+/**
+ * «Mi lista» is your real Crunchyroll list: adding here adds there and the other way round.
+ * Netflix and Prime Video do not let another app write in their lists, so SalaTV does not pretend to.
+ */
 object MyList {
-    private fun key(c: Context) = "mylist:" + Prefs.current(c).id
+    private fun file(c: Context) = File(c.filesDir, "mylist-" + Prefs.current(c).id + ".json")
 
-    fun all(c: Context): List<Title> = try {
-        val a = JSONArray(Prefs.str(c, key(c)) ?: "[]")
-        (0 until a.length()).map { Title.fromJson(a.getJSONObject(it)) }
+    fun all(c: Context): List<Show> = try {
+        val a = JSONArray(file(c).readText())
+        (0 until a.length()).map { Show.fromJson(a.getJSONObject(it)) }
     } catch (e: Exception) { emptyList() }
 
-    fun has(c: Context, t: Title) = all(c).any { it.key == t.key }
+    /** Can [t] go to «Mi lista»? Only when it is on Crunchyroll and the account is connected. */
+    fun canAdd(c: Context, t: Title) = Crunchy.linked(c) && Crunchy.PKG in t.pkgs
 
-    fun toggle(c: Context, t: Title): Boolean {
-        val l = all(c).toMutableList()
-        val had = l.removeAll { it.key == t.key }
-        if (!had) l.add(0, t)
-        Prefs.put(c, key(c), JSONArray(l.map { it.toJson() }).toString())
-        return !had
+    fun has(c: Context, t: Title) = all(c).any { it.title.equals(t.name, true) }
+
+    fun refresh(c: Context): List<Show> {
+        if (!Crunchy.linked(c)) return emptyList()
+        val l = Crunchy.watchlist(c)
+        file(c).writeText(JSONArray(l.map { it.toJson() }).toString())
+        return l
     }
 
-    /** Re-checks where each title streams (it changes), at most once a day. */
-    fun refresh(c: Context) {
-        if (!Tmdb.enabled(c) || System.currentTimeMillis() - Prefs.long(c, key(c) + "At") < 86_400_000L) return
-        val l = all(c).map { t -> try { Title(t.type, t.id, t.name, t.overview, t.backdrop, t.poster, t.rating, t.year, Tmdb.apps(c, t.type, t.id)) } catch (e: Exception) { t } }
-        Prefs.put(c, key(c), JSONArray(l.map { it.toJson() }).toString())
-        Prefs.put(c, key(c) + "At", System.currentTimeMillis())
+    /** Adds or removes [t] in your Crunchyroll list. Network; off the main thread. Returns true when added. */
+    fun toggle(c: Context, t: Title): Boolean {
+        val id = all(c).firstOrNull { it.title.equals(t.name, true) }?.key?.removePrefix("crw:")
+        if (id != null) { Crunchy.removeFromWatchlist(c, id); refresh(c); return false }
+        val sid = Crunchy.findSeries(c, t.name) ?: throw IllegalStateException("No está en Crunchyroll")
+        Crunchy.addToWatchlist(c, sid)
+        refresh(c)
+        return true
+    }
+
+    fun remove(c: Context, s: Show) {
+        Crunchy.removeFromWatchlist(c, s.key.removePrefix("crw:"))
+        refresh(c)
+    }
+}
+
+/** «Porque viste…»: recommendations from the series at the top of «Seguir viendo». */
+object Because {
+    private fun file(c: Context) = File(c.filesDir, "because-" + Prefs.current(c).id + ".json")
+
+    fun cached(c: Context): Pair<String, List<Title>> = try {
+        val o = JSONObject(file(c).readText())
+        val a = o.getJSONArray("items")
+        o.getString("name") to (0 until a.length()).map { Title.fromJson(a.getJSONObject(it)) }
+    } catch (e: Exception) { "" to emptyList() }
+
+    fun refresh(c: Context, feed: List<Show>) {
+        if (!Tmdb.enabled(c)) return
+        val seed = feed.firstOrNull { it.pkg != "org.smarttube.stable" }?.title ?: return
+        val f = file(c)
+        if (f.exists() && System.currentTimeMillis() - f.lastModified() < 12 * 3600_000L && cached(c).first == seed) return
+        val items = Tmdb.because(c, seed)
+        f.writeText(JSONObject().put("name", seed).put("items", JSONArray(items.map { it.toJson() })).toString())
     }
 }
 
@@ -187,17 +219,8 @@ object AppSearch {
         else Ui.toast(c, "No se pudo abrir ${Services.name(pkg)}")
     }
 
-    /** A TMDB title in an app: Crunchyroll straight to the series when found, the rest through their search. */
-    fun openTitle(c: Context, pkg: String, t: Title) {
-        if (pkg == Crunchy.PKG && Crunchy.linked(c)) {
-            Bg.run({ Crunchy.findSeries(c, t.name) }) { r ->
-                val id = r.getOrNull()
-                if (id == null || !Sys.start(c, pkg, Intent(Intent.ACTION_VIEW, Uri.parse("https://www.crunchyroll.com/series/$id")).setPackage(pkg))) go(c, pkg, t.name)
-            }
-            return
-        }
-        go(c, pkg, t.name)
-    }
+    /** A TMDB title inside an app, straight to it when the app allows (see [Deep]). */
+    fun openTitle(c: Context, pkg: String, t: Title) = Deep.title(c, pkg, t)
 }
 
 /**

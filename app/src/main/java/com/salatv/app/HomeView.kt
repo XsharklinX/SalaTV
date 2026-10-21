@@ -48,6 +48,7 @@ class HomeView(context: Context) : View(context) {
         fun onMove()
         /** 0 = watch in its app, 1 = add to or remove from «Mi lista», 2 = title page. */
         fun onTrend(t: Title, action: Int)
+        fun onChipMenu(chip: Chip)
     }
 
     sealed class Item(val key: String) {
@@ -79,13 +80,28 @@ class HomeView(context: Context) : View(context) {
         fun snap(x: Float) { v = x; t = x }
     }
 
+    /** «Foco con efecto muelle»: a light spring that overshoots a little and settles in about 200 ms. */
+    class Spring(var v: Float) {
+        var t = v
+        private var vel = 0f
+        fun step(dt: Float): Boolean {
+            if (abs(t - v) < 0.0015f && abs(vel) < 0.01f) { v = t; vel = 0f; return false }
+            val h = dt.coerceAtMost(0.032f)
+            vel += ((t - v) * 520f - vel * 26f) * h
+            v += vel * h
+            return true
+        }
+    }
+
     companion object {
         const val SEARCH = 1; const val INPUT = 2; const val WIFI = 3; const val GEAR = 4
-        const val AVATAR = 5; const val WARN = 6; const val NOWIFI = 7
+        const val AVATAR = 5; const val WARN = 6; const val NOWIFI = 7; const val COMPASS = 8
         private const val MARGIN = 48f
     }
 
     var host: Host? = null
+    /** Whether a title can go to «Mi lista» (it is on Crunchyroll and the account is connected). */
+    var canList: (Title) -> Boolean = { false }
     var placeholder: Bitmap? = null
 
     private var chips: List<Chip> = emptyList()
@@ -121,7 +137,10 @@ class HomeView(context: Context) : View(context) {
     private val fade = Anim(1f)
     private val mix = Anim(1f)
     private val zoom = Anim(0f)
-    private val scales = HashMap<String, Anim>()
+    private val scales = HashMap<String, Spring>()
+    private var frameDt = 0.016f
+    /** «Profundidad al moverte»: the background picture drifts a little against the focus. */
+    private val parallax = Anim(0f)
     private var bgCur: Bitmap? = null
     private var bgPrev: Bitmap? = null
     private var colorPrev = Ui.LAMP
@@ -153,9 +172,10 @@ class HomeView(context: Context) : View(context) {
             pal = Pal(Look.isDay(context))
             val now = SystemClock.uptimeMillis()
             val onHero = lines.getOrNull(li)?.kind == Kind.HERO
-            if (trends.size > 1 && now - trendSince > 8000 && now - lastInput > (if (onHero) 15000 else 6000) && pending == null) {
+            if (trends.size > 1 && now - trendSince > Prefs.int(context, "carouselSpeed", 8) * 1000L && now - lastInput > (if (onHero) 15000 else 6000) && pending == null) {
                 trendIx = (trendIx + 1) % trends.size
                 trendSince = now
+                trends.getOrNull((trendIx + 1) % trends.size)?.let { img(tmdb(it.backdrop, "w1280"), 1280) }
                 if (heroShowsTrend()) focusChanged(true)
             }
             invalidate()
@@ -265,7 +285,7 @@ class HomeView(context: Context) : View(context) {
 
     private fun img(src: String?, w: Int): Bitmap? = Img.get(context, src, w) { invalidate() }
 
-    private fun tmdb(path: String?, size: String) = path?.let { Tmdb.IMG + size + it }
+    private fun tmdb(path: String?, size: String) = path?.let { if (it.startsWith("http")) it else Tmdb.IMG + size + it }
 
     /** The big picture behind the top of the screen for what has the focus. */
     private fun heroArt(): Bitmap? {
@@ -306,7 +326,8 @@ class HomeView(context: Context) : View(context) {
             a.t = ((col - (per - 2)) * cardStep()).coerceIn(0f, max(0f, (ln.items.size - per) * cardStep()))
             if (!animate) a.snap(a.t)
         }
-        if (!animate) scroll.snap(scroll.t)
+        parallax.t = if (ln?.kind == Kind.DOCK || ln?.kind == Kind.CARDS) -min(60f, col * 7f) else 0f
+        if (!animate) { scroll.snap(scroll.t); parallax.snap(parallax.t) }
         invalidate()
     }
 
@@ -380,7 +401,7 @@ class HomeView(context: Context) : View(context) {
         when (val cur = current()) {
             is Chip -> host?.onChip(cur)
             is String -> trend()?.let { host?.onTrend(it, if (cur == "ver") 0 else 1) }
-            is Item.App, is Item.Card -> startZoom(cur as Item, ln)
+            is Item.App, is Item.Card, is Item.Pick -> startZoom(cur as Item, ln)
             is Item -> host?.onOpen(cur)
         }
     }
@@ -411,7 +432,7 @@ class HomeView(context: Context) : View(context) {
         if (!animationsOn() || pending != null) { host?.onOpen(item); return }
         focusRect(zoomFrom)
         zoomColor = when (item) { is Item.App -> item.e.tile; else -> Ui.shade(itemColor(item), 0.4f) }
-        zoomArt = when (item) { is Item.App -> item.e.banner ?: item.e.icon; is Item.Card -> img(item.s.image, 960); else -> null }
+        zoomArt = when (item) { is Item.App -> item.e.banner ?: item.e.icon; is Item.Card -> img(item.s.image, 960); is Item.Pick -> img(tmdb(item.t.backdrop, "w780"), 960); else -> null }
         zoom.v = 0f; zoom.t = 1f
         pending = item
         invalidate()
@@ -425,6 +446,7 @@ class HomeView(context: Context) : View(context) {
         when (val cur = current()) {
             is Item -> host?.onMenu(cur, line()?.kind == Kind.DOCK, anchor())
             is String -> trend()?.let { host?.onTrend(it, 2) }
+            is Chip -> host?.onChipMenu(cur)
         }
     }
 
@@ -466,10 +488,12 @@ class HomeView(context: Context) : View(context) {
         val dt = if (lastFrame == 0L) 16f else min(64f, (now - lastFrame).toFloat())
         lastFrame = now
         frameK = min(1f, (1f - exp(-dt / 95f)) * if (fast) 2.2f else 1f)
+        frameDt = dt / 1000f
         var busy = scroll.step(frameK)
         rowOff.values.forEach { busy = it.step(frameK) or busy }
         busy = fade.step(frameK * 0.75f) or busy
         busy = mix.step(frameK * 0.75f) or busy
+        busy = parallax.step(frameK * 0.6f) or busy
 
         // The whole background (blurred picture, day veil, shades, colour glow) is one pre-composed
         // bitmap per focus: one full-screen draw per frame instead of seven.
@@ -592,6 +616,7 @@ class HomeView(context: Context) : View(context) {
         // layer and the two masks per frame missed 40 % of frames on the TV.
         val faded = fadedArt(art, rect.width().toInt(), rect.height().toInt())
         c.save()
+        c.translate(s(parallax.v), 0f)
         if (moving) {
             val k = ((now - trendSince) % 12_000L) / 12_000f
             c.scale(1f + 0.07f * k, 1f + 0.07f * k, rect.centerX() + s(40f), rect.centerY())
@@ -662,7 +687,7 @@ class HomeView(context: Context) : View(context) {
                 listOf(cur.t.kind, cur.t.year, cur.t.ratingText).filter { it.isNotEmpty() }.joinToString(" · "), cur.t.overview,
                 if (cur.t.pkgs.isEmpty()) "Aún no está en tus apps" else "OK para ver en ${Services.name(cur.t.pkgs.first())}")
             heroShowsTrend() -> trend()?.let { t ->
-                HeroInfo(t.pkgs.firstOrNull(), "Tendencia nº ${trendIx + 1} esta semana", t.name,
+                HeroInfo(t.pkgs.firstOrNull(), if (t.type == "show") "Episodio nuevo de tu serie" else "Tendencia nº ${trendIx + 1} esta semana", t.name,
                     listOf(t.kind, t.year, t.ratingText).filter { it.isNotEmpty() }.joinToString(" · "), t.overview, null)
             }
             cur is Chip -> HeroInfo(null, if (cur.warn) "Aviso" else "SalaTV", cur.title, "", cur.desc, null)
@@ -687,8 +712,22 @@ class HomeView(context: Context) : View(context) {
         var size = if (compact) 34f else 50f * min(1f, dens + 0.08f)
         txt.textSize = s(size)
         while (txt.measureText(info.title) > s(540f) && size > 26f) { size -= 2f; txt.textSize = s(size) }
-        y += size * 0.95f + 8f
-        c.drawText(ellipsize(info.title, s(540f)), s(x - 2f), s(y), txt)
+        // «Logos de los títulos»: the title's own logo when TMDB has one.
+        val logoPath = if (!compact && heroShowsTrend()) trend()?.logo else null
+        val logo = logoPath?.let { img(tmdb(it, "w500"), 500) }
+        if (logo != null) {
+            val maxW = 420f; val maxH = 110f
+            val k = min(maxW / logo.width * u, maxH / logo.height * u)
+            val lw = logo.width * k; val lh = logo.height * k
+            rect2.set(s(x), s(y + 10f), s(x) + lw, s(y + 10f) + lh)
+            glow.color = Color.WHITE; glow.setShadowLayer(s(10f), 0f, s(2f), if (pal.day) 0x99000000.toInt() else 0x66000000)
+            c.drawBitmap(logo, null, rect2, glow)
+            glow.clearShadowLayer()
+            y += lh / u + 10f
+        } else {
+            y += size * 0.95f + 8f
+            c.drawText(ellipsize(info.title, s(540f)), s(x - 2f), s(y), txt)
+        }
         txt.letterSpacing = 0f
         if (info.meta.isNotEmpty()) {
             y += 26f
@@ -706,7 +745,7 @@ class HomeView(context: Context) : View(context) {
             val t = trend() ?: return
             val onHero = line()?.kind == Kind.HERO
             val acc = itemColor(null)
-            val labels = listOf("▶  Ver en " + (t.pkgs.firstOrNull()?.let { Services.name(it) } ?: "su app"), if (t.key in mine) "✓  En mi lista" else "+  Mi lista")
+            val labels = listOf("▶  Ver en " + (t.pkgs.firstOrNull()?.let { Services.name(it) } ?: "su app"), when { t.type == "show" -> "ⓘ  Ver la serie"; !canList(t) -> "ⓘ  Ficha"; t.key in mine || mine.contains(t.name.lowercase()) -> "✓  En mi lista"; else -> "+  Mi lista" })
             var bx = x
             labels.forEachIndexed { i, l ->
                 txt.typeface = Fonts.medium; txt.textSize = s(15f)
@@ -796,9 +835,9 @@ class HomeView(context: Context) : View(context) {
 
     /** A 16:9 card: picture, service, title, episode, progress and «Nuevo». */
     private fun card(c: Canvas, item: Item, x: Float, y: Float, focused: Boolean): Boolean {
-        val a = scales.getOrPut(item.key) { Anim(1f) }
+        val a = scales.getOrPut(item.key) { Spring(1f) }
         a.t = if (focused) 1.07f else 1f
-        val busy = a.step(frameK)
+        val busy = a.step(frameDt)
         val X = s(x); val Y = s(y); val W = s(cardW()); val H = s(cardH())
         val r = s(11f)
         c.save()
@@ -808,8 +847,10 @@ class HomeView(context: Context) : View(context) {
         if (focused) halo(c, rect, r, color, a.v)
         c.save()
         fill.color = Ui.shade(color, 0.3f); c.drawRoundRect(rect, r, r, fill)
+        val pic = cardImage(item)
+        if (pic == null) shimmer(c, rect, r)
         // Rounded picture through a shader: clipping to a path is slow on the TV's GPU.
-        cardImage(item)?.let { b ->
+        pic?.let { b ->
             val scale = max(rect.width() / b.width, rect.height() / b.height)
             m.setScale(scale, scale)
             m.postTranslate(rect.left + (rect.width() - b.width * scale) / 2, rect.top + (rect.height() - b.height * scale) / 2)
@@ -866,6 +907,17 @@ class HomeView(context: Context) : View(context) {
         return busy
     }
 
+    /** «Carga con brillo»: a light band sweeps across a card until its picture arrives. */
+    private fun shimmer(c: Canvas, r: RectF, radius: Float) {
+        val phase = (SystemClock.uptimeMillis() % 1400L) / 1400f
+        val x0 = r.left - r.width() + r.width() * 3f * phase
+        fill.color = Color.BLACK
+        fill.shader = LinearGradient(x0, 0f, x0 + r.width(), 0f, intArrayOf(0x00FFFFFF, 0x26FFFFFF, 0x00FFFFFF), null, Shader.TileMode.CLAMP)
+        c.drawRoundRect(r, radius, radius, fill)
+        fill.shader = null
+        postInvalidateDelayed(40)
+    }
+
     private data class Quint(val a: String, val b: String, val c: Float, val d: Boolean, val e: String?)
 
     private fun drawGrid(c: Canvas, i: Int, ln: Line): Boolean {
@@ -884,9 +936,9 @@ class HomeView(context: Context) : View(context) {
 
     /** One tile; returns true while its focus animation is still running. */
     private fun tile(c: Canvas, item: Item, x: Float, y: Float, w: Float, h: Float, focused: Boolean, big: Float, alwaysName: Boolean): Boolean {
-        val a = scales.getOrPut(item.key) { Anim(1f) }
+        val a = scales.getOrPut(item.key) { Spring(1f) }
         a.t = if (focused) big else 1f
-        val busy = a.step(frameK)
+        val busy = a.step(frameDt)
         val sc = a.v
         val X = s(x); val Y = s(y); val W = s(w); val H = s(h)
         val cx = X + W / 2; val cy = Y + H / 2
@@ -1013,9 +1065,9 @@ class HomeView(context: Context) : View(context) {
             val w = if (wide) s(13f) + (if (ch.icon > 0) s(24f) else 0f) + txt.measureText(ch.label) + s(14f) else s(34f)
             rect.set(right - w, s(28f), right, s(62f))
             chipCx[i] = rect.centerX() / u
-            val a = scales.getOrPut("c:" + ch.id) { Anim(1f) }
+            val a = scales.getOrPut("c:" + ch.id) { Spring(1f) }
             a.t = if (focused) 1.06f else 1f
-            busy = a.step(frameK) or busy
+            busy = a.step(frameDt) or busy
             c.save()
             c.scale(a.v, a.v, rect.centerX(), rect.centerY())
             val rad = rect.height() / 2
@@ -1102,11 +1154,25 @@ class HomeView(context: Context) : View(context) {
                 if (type == NOWIFI) c.drawLine(x(4f), y(4f), x(20f), y(20f), stroke)
             }
             GEAR -> {
-                c.drawCircle(x(12f), y(12f), 3.4f * k, stroke)
-                for (i in 0 until 8) {
-                    val a = i * Math.PI / 4
-                    c.drawLine(x(12f + cos(a).toFloat() * 6.6f), y(12f + sin(a).toFloat() * 6.6f), x(12f + cos(a).toFloat() * 9.6f), y(12f + sin(a).toFloat() * 9.6f), stroke)
+                // A real cog: eight square teeth around a ring, with the hole in the middle.
+                path.reset()
+                val teeth = 8
+                for (i in 0 until teeth * 2) {
+                    val a0 = (i * Math.PI / teeth) - Math.PI / (teeth * 2)
+                    val a1 = a0 + Math.PI / teeth
+                    val r = if (i % 2 == 0) 9.8f else 7.4f
+                    val px0 = x(12f + cos(a0).toFloat() * r); val py0 = y(12f + sin(a0).toFloat() * r)
+                    if (i == 0) path.moveTo(px0, py0) else path.lineTo(px0, py0)
+                    path.lineTo(x(12f + cos(a1).toFloat() * r), y(12f + sin(a1).toFloat() * r))
                 }
+                path.close()
+                c.drawPath(path, stroke)
+                c.drawCircle(x(12f), y(12f), 3.2f * k, stroke)
+            }
+            COMPASS -> {
+                c.drawCircle(x(12f), y(12f), 9.5f * k, stroke)
+                path.reset(); path.moveTo(x(15.8f), y(8.2f)); path.lineTo(x(13.4f), y(13.4f)); path.lineTo(x(8.2f), y(15.8f)); path.lineTo(x(10.6f), y(10.6f)); path.close()
+                c.drawPath(path, fill)
             }
             WARN -> {
                 path.reset(); path.moveTo(x(12f), y(3.5f)); path.lineTo(x(21.5f), y(20f)); path.lineTo(x(2.5f), y(20f)); path.close()

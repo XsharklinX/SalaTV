@@ -23,12 +23,14 @@ object Http {
 
     fun post(url: String, body: String, type: String, headers: Map<String, String> = emptyMap()) = call("POST", url, body, type, headers)
 
+    fun delete(url: String, headers: Map<String, String> = emptyMap()) = call("DELETE", url, null, null, headers)
+
     private fun call(method: String, url: String, body: String?, type: String?, headers: Map<String, String>): String {
         val con = URL(url).openConnection() as HttpURLConnection
         con.requestMethod = method
         con.connectTimeout = 10_000
         con.readTimeout = 20_000
-        con.setRequestProperty("User-Agent", "SalaTV/0.3")
+        con.setRequestProperty("User-Agent", "SalaTV/0.4")
         con.setRequestProperty("Accept", "application/json")
         headers.forEach { (k, v) -> con.setRequestProperty(k, v) }
         if (body != null) {
@@ -82,7 +84,7 @@ object Img {
         if (!f.exists()) {
             val con = URL(src).openConnection() as HttpURLConnection
             con.connectTimeout = 10_000; con.readTimeout = 20_000
-            con.setRequestProperty("User-Agent", "SalaTV/0.3")
+            con.setRequestProperty("User-Agent", "SalaTV/0.4")
             val tmp = File(dir, f.name + ".part")
             con.inputStream.use { i -> tmp.outputStream().use { i.copyTo(it) } }
             tmp.renameTo(f)
@@ -97,7 +99,9 @@ object Img {
         BitmapFactory.decodeFile(f.path, o)
         var sample = 1
         while (o.outWidth / (sample * 2) >= width) sample *= 2
-        return BitmapFactory.decodeFile(f.path, BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.RGB_565 })
+        // PNG logos keep their transparency; photos use half the memory.
+        val png = o.outMimeType == "image/png"
+        return BitmapFactory.decodeFile(f.path, BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = if (png) Bitmap.Config.ARGB_8888 else Bitmap.Config.RGB_565 })
     }
 
     /** Keeps the disk cache under 60 MB, oldest out first. */

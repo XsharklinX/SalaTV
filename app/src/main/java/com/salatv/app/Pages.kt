@@ -31,42 +31,78 @@ fun pill(col: LinearLayout, label: String, accent: Int, onClick: () -> Unit): Te
     return t
 }
 
-/** «Ficha del título»: picture, synopsis, where it streams, trailer and «Mi lista». */
+/** «Ficha completa»: logo, synopsis, where it streams, trailer, seasons with episodes, cast and similar titles. */
 class TitleActivity : Screen() {
     private lateinit var base: Title
+    private var details: TitleDetails? = null
+    private var season = 1
+    private lateinit var episodes: LinearLayout
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
         Fonts.init(this)
         base = Title.fromJson(JSONObject(intent.getStringExtra("json") ?: return finish()))
-        render(base, null)
+        render()
         Bg.run({ Tmdb.details(this, base.type, base.id) }) { r ->
-            r.onSuccess { render(it.title, it) }.onFailure { Registro.add(this, "Ficha", "${base.name}: ${it.message}") }
+            r.onSuccess { details = it; render() }.onFailure { Registro.add(this, "Ficha", "${base.name}: ${it.message}") }
         }
     }
 
-    private fun render(t: Title, d: TitleDetails?) {
+    private fun dp(v: Int) = Ui.px(this, v)
+
+    private fun image(view: ImageView, src: String?, w: Int) {
+        fun load() { Img.get(this, src, w) { load() }?.let { view.setImageBitmap(it) } }
+        load()
+    }
+
+    private fun focusBox(accent: Int, radius: Float) = android.graphics.drawable.StateListDrawable().apply {
+        addState(intArrayOf(android.R.attr.state_focused), Ui.halo(this@TitleActivity, accent, Ui.dp(this@TitleActivity, radius)))
+        addState(intArrayOf(), GradientDrawable().apply { setColor(Color.TRANSPARENT) })
+    }
+
+    private fun render() {
+        val d = details
+        val t = d?.title ?: base
+        val accent = t.pkgs.firstOrNull()?.let { Services.badge(it).second } ?: Ui.LAMP
         val root = FrameLayout(this).apply { setBackgroundColor(Ui.BG) }
-        val art = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; alpha = 0.55f }
+        val art = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; alpha = 0.6f }
         root.addView(art, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        fun loadArt() { Img.get(this, t.backdrop?.let { Tmdb.IMG + "w1280" + it }, 1280) { loadArt() }?.let { art.setImageBitmap(it) } }
-        loadArt()
+        image(art, t.backdrop?.let { if (it.startsWith("http")) it else Tmdb.IMG + "w1280" + it }, 1280)
         root.addView(View(this).apply {
-            background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(0xF205060A.toInt(), 0xB305060A.toInt(), 0x2005060A))
+            background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(0xF205060A.toInt(), 0xC005060A.toInt(), 0x3005060A))
         }, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(Ui.px(this@TitleActivity, 56), Ui.px(this@TitleActivity, 56), 0, 0) }
+        val scroll = android.widget.ScrollView(this).apply { isVerticalScrollBarEnabled = false }
+        val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(52), dp(40), dp(40), dp(40)) }
+        scroll.addView(page)
+        root.addView(scroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        page.addView(top)
+        val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        top.addView(left, LinearLayout.LayoutParams(dp(470), ViewGroup.LayoutParams.WRAP_CONTENT))
+
         val meta = listOf(t.kind, t.year, t.ratingText, d?.genres ?: "").filter { it.isNotEmpty() }.joinToString(" · ")
-        col.addView(Ui.text(this, meta.uppercase(), 12f, Ui.MUTED, Fonts.medium).apply { letterSpacing = 0.12f })
-        col.addView(Ui.text(this, t.name, 40f, Ui.FG, Fonts.bold).apply { maxLines = 2 },
-            LinearLayout.LayoutParams(Ui.px(this, 560), ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = Ui.px(this@TitleActivity, 8) })
-        if (!d?.extra.isNullOrEmpty()) col.addView(Ui.text(this, d!!.extra, 14f, Ui.MUTED, Fonts.regular),
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = Ui.px(this@TitleActivity, 6) })
-        col.addView(Ui.text(this, t.overview.ifEmpty { "Sin sinopsis en español." }, 15f, Ui.FG, Fonts.light).apply { maxLines = 5; alpha = 0.88f },
-            LinearLayout.LayoutParams(Ui.px(this, 520), ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = Ui.px(this@TitleActivity, 14) })
+        left.addView(Ui.text(this, meta.uppercase(), 11.5f, Ui.MUTED, Fonts.medium).apply { letterSpacing = 0.12f })
+        if (t.logo != null) {
+            val logo = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_START; adjustViewBounds = true }
+            image(logo, Tmdb.IMG + "w500" + t.logo, 500)
+            left.addView(logo, LinearLayout.LayoutParams(dp(400), dp(110)).apply { topMargin = dp(10) })
+        } else {
+            left.addView(Ui.text(this, t.name, 36f, Ui.FG, Fonts.bold).apply { maxLines = 2 },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
+        }
+        if (!d?.extra.isNullOrEmpty()) left.addView(Ui.text(this, d!!.extra, 13f, Ui.MUTED, Fonts.regular),
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
+        left.addView(Ui.text(this, t.overview.ifEmpty { "Sin sinopsis en español." }, 14.5f, Ui.FG, Fonts.light).apply { maxLines = 5; alpha = 0.9f },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) })
+
+        // Buttons: «Seguir T2 E7» if it is in «Seguir viendo», else «Ver en …» for each app, straight into the title.
         val btns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         var first: View? = null
+        val resume = Feed.cached(this).firstOrNull { it.title.equals(t.name, true) }
+        if (resume != null) first = pill(btns, "▶  Seguir · " + resume.sub.removePrefix("Siguiente: ").substringBefore(" «"), Services.badge(resume.pkg).second) { Feed.open(this, resume) }
         t.pkgs.forEach { pkg ->
-            val v = pill(btns, "▶  Ver en ${Services.name(pkg)}", Services.badge(pkg).second) { AppSearch.openTitle(this, pkg, t) }
+            val v = pill(btns, (if (resume == null) "▶  " else "") + "Ver en ${Services.name(pkg)}", Services.badge(pkg).second) { Deep.title(this, pkg, t) }
             if (first == null) first = v
         }
         val trailer = d?.trailer
@@ -79,18 +115,118 @@ class TitleActivity : Screen() {
             }
             if (first == null) first = v
         }
-        lateinit var listBtn: TextView
-        listBtn = pill(btns, if (MyList.has(this, t)) "✓  En mi lista" else "+  Mi lista", Ui.LAMP) {
-            val added = MyList.toggle(this, t)
-            listBtn.text = if (added) "✓  En mi lista" else "+  Mi lista"
+        // «Mi lista» only when it really reaches your Crunchyroll list.
+        if (MyList.canAdd(this, t)) {
+            lateinit var listBtn: TextView
+            listBtn = pill(btns, if (MyList.has(this, t)) "✓  En mi lista" else "+  Mi lista", Services.badge(Crunchy.PKG).second) {
+                listBtn.text = "…"
+                Bg.run({ MyList.toggle(this, t) }) { r ->
+                    r.onSuccess { listBtn.text = if (it) "✓  En mi lista" else "+  Mi lista" }
+                        .onFailure { listBtn.text = "+  Mi lista"; Ui.toast(this, "Crunchyroll no dejó cambiar la lista") }
+                }
+            }
+            if (first == null) first = listBtn
         }
-        if (first == null) first = listBtn
-        col.addView(btns, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = Ui.px(this@TitleActivity, 22) })
-        if (t.pkgs.isEmpty()) col.addView(Ui.text(this, "No está en ninguna de tus apps en ${Tmdb.REGIONS.firstOrNull { it.first == Tmdb.region(this) }?.second ?: Tmdb.region(this)}. Guárdala en Mi lista y SalaTV te dirá cuándo llegue.", 13f, Ui.WARN, Fonts.light),
-            LinearLayout.LayoutParams(Ui.px(this, 520), ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = Ui.px(this@TitleActivity, 12) })
-        root.addView(col, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        left.addView(btns, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(18) })
+        if (t.pkgs.isEmpty()) left.addView(Ui.text(this, "No está en ninguna de tus apps en ${Tmdb.REGIONS.firstOrNull { it.first == Tmdb.region(this) }?.second ?: Tmdb.region(this)}.", 13f, Ui.WARN, Fonts.light),
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
+
+        // Seasons and episodes, on the right.
+        if (t.type == "tv" && d != null && d.seasons.isNotEmpty()) {
+            val right = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            top.addView(right, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(36) })
+            val chipsWrap = android.widget.HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+            val chipsCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            chipsWrap.addView(chipsCol)
+            right.addView(chipsWrap)
+            if (resume != null) Regex("T(\\d+)").find(resume.sub)?.groupValues?.get(1)?.toIntOrNull()?.let { n -> if (d.seasons.any { it.first == n }) season = n }
+            Ui.chips(chipsCol, d.seasons.map { it.second.ifEmpty { "Temporada ${it.first}" } }, d.seasons.indexOfFirst { it.first == season }) { i ->
+                season = d.seasons[i].first; loadEpisodes(t)
+            }
+            episodes = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            right.addView(episodes, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
+            loadEpisodes(t)
+        }
+
+        if (d != null && d.cast.isNotEmpty()) {
+            page.addView(Ui.text(this, "REPARTO", 11f, Ui.MUTED, Fonts.medium).apply { letterSpacing = 0.14f },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(26) })
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            d.cast.forEach { (name, pic) ->
+                val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL }
+                val iv = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; clipToOutline = true
+                    background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Ui.PANEL2) } }
+                image(iv, pic?.let { Tmdb.IMG + "w185" + it }, 160)
+                box.addView(iv, LinearLayout.LayoutParams(dp(60), dp(60)))
+                box.addView(Ui.text(this, name, 11.5f, Ui.MUTED, Fonts.regular).apply { maxLines = 2; gravity = Gravity.CENTER },
+                    LinearLayout.LayoutParams(dp(78), ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
+                row.addView(box, LinearLayout.LayoutParams(dp(82), ViewGroup.LayoutParams.WRAP_CONTENT))
+            }
+            page.addView(android.widget.HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(row) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
+        }
+
+        if (d != null && d.similar.isNotEmpty()) {
+            page.addView(Ui.text(this, "SI TE GUSTA, TAMBIÉN", 11f, Ui.MUTED, Fonts.medium).apply { letterSpacing = 0.14f },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(24) })
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(4), dp(8), 0, dp(8)) }
+            d.similar.take(14).forEach { s ->
+                val box = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL; isFocusable = true; isClickable = true
+                    setPadding(dp(3), dp(3), dp(3), dp(3)); background = focusBox(Ui.LAMP, 10f)
+                    setOnClickListener {
+                        startActivity(Intent(this@TitleActivity, TitleActivity::class.java).putExtra("json", s.toJson().toString()))
+                        @Suppress("DEPRECATION") overridePendingTransition(android.R.anim.fade_in, 0)
+                    }
+                }
+                val iv = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; clipToOutline = true
+                    background = GradientDrawable().apply { setColor(Ui.PANEL2); cornerRadius = Ui.dp(this@TitleActivity, 8f) } }
+                image(iv, s.poster?.let { Tmdb.IMG + "w342" + it }, 220)
+                box.addView(iv, LinearLayout.LayoutParams(dp(100), dp(150)))
+                box.addView(Ui.text(this, s.name, 12f, Ui.FG, Fonts.medium).apply { maxLines = 2 }, LinearLayout.LayoutParams(dp(100), ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(5) })
+                row.addView(box, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(8) })
+            }
+            page.addView(android.widget.HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(row) })
+        }
+
         setContentView(root)
         first?.requestFocus()
+    }
+
+    private fun loadEpisodes(t: Title) {
+        val box = episodes
+        box.removeAllViews()
+        box.addView(Ui.text(this, "Cargando episodios…", 13f, Ui.MUTED, Fonts.light))
+        val n = season
+        Bg.run({ Tmdb.season(this, t.id, n) }) { r ->
+            if (n != season) return@run
+            box.removeAllViews()
+            val list = r.getOrNull().orEmpty()
+            if (list.isEmpty()) { box.addView(Ui.text(this, "Sin episodios en TMDB.", 13f, Ui.MUTED, Fonts.light)); return@run }
+            val resume = Feed.cached(this).firstOrNull { it.title.equals(t.name, true) }
+            val resumeEp = resume?.let { Regex("T(\\d+) · E(\\d+)").find(it.sub) }?.let { it.groupValues[1].toInt() to it.groupValues[2].toInt() }
+            list.forEach { e ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; isFocusable = true; isClickable = true
+                    setPadding(dp(6), dp(6), dp(10), dp(6)); background = focusBox(Ui.LAMP, 10f)
+                    // Inside each app the exact episode is picked there; SalaTV opens the series straight away.
+                    setOnClickListener {
+                        if (resume != null && resumeEp == (n to e.number)) Feed.open(this@TitleActivity, resume)
+                        else t.pkgs.firstOrNull()?.let { Deep.title(this@TitleActivity, it, t) }
+                    }
+                }
+                val iv = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; clipToOutline = true
+                    background = GradientDrawable().apply { setColor(Ui.PANEL2); cornerRadius = Ui.dp(this@TitleActivity, 6f) } }
+                image(iv, e.still?.let { Tmdb.IMG + "w300" + it }, 240)
+                row.addView(iv, LinearLayout.LayoutParams(dp(112), dp(63)))
+                val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), 0, 0, 0) }
+                val here = resumeEp == (n to e.number)
+                texts.addView(Ui.text(this, "${e.number}. ${e.name}", 14f, if (here) Ui.LAMP else Ui.FG, Fonts.medium).apply { maxLines = 1 })
+                texts.addView(Ui.text(this, if (here) "Aquí te quedaste" else e.date, 12f, Ui.MUTED, Fonts.light))
+                row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                box.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(4) })
+            }
+        }
     }
 }
 
@@ -222,7 +358,7 @@ class SearchActivity : Screen() {
                 }
                 setOnClickListener {
                     val pkg = t.pkgs.firstOrNull()
-                    if (t.pkgs.size == 1 && pkg != null) AppSearch.openTitle(this@SearchActivity, pkg, t)
+                    if (t.pkgs.size == 1 && pkg != null) Deep.title(this@SearchActivity, pkg, t)
                     else startActivity(Intent(this@SearchActivity, TitleActivity::class.java).putExtra("json", t.toJson().toString()))
                 }
             }
